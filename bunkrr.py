@@ -196,9 +196,15 @@ def download_images_from_urls(urls, album_folder):
 
 
 if __name__ == "__main__":
-    url, folder_name = get_user_input()
-    image_data = fetch_image_data(url)
-    if image_data:
-        folder_path = create_download_folder(folder_name)
-        download_urls = generate_download_urls(image_data)
-        download_images_from_urls(download_urls, folder_path)
+    while True:
+        url, folder_name = get_user_input()
+        image_data = fetch_image_data(url)
+        if image_data:
+            folder_path = create_download_folder(folder_name)
+            download_urls = generate_download_urls(image_data)
+            download_images_from_urls(download_urls, folder_path)
+            download_again = input(
+                "[?] Do you want to download again? (Y/N, default N): ").lower()
+
+        if download_again not in ['y', 'yes', 't']:
+            break
