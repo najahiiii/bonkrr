@@ -11,15 +11,16 @@ DEFAULT_PARENT_FOLDER = 'downloads'
 
 def get_user_input():
     """
-    Prompt the user to enter the bunkrr Album URL and album folder name,
-    and return them as a tuple.
+    Prompt the user to enter the bunkrr Album URL and album folder name.
+    If the album folder name is not provided, the default parent folder will be used.
 
     Returns:
-        tuple: A tuple containing the bunkrr Album URL and album folder name.
+        tuple: A tuple containing the bunkrr Album URL and the album folder path.
     """
     print("-----------------------------------------")
     base_url = input("[?] Enter bunkrr Album URL: ")
     album_folder_input = input("[?] Enter album folder name: ")
+
     if album_folder_input.strip():
         album_folder = os.path.join(
             os.getcwd(),
@@ -27,28 +28,80 @@ def get_user_input():
             album_folder_input.strip())
     else:
         album_folder = os.path.join(os.getcwd(), DEFAULT_PARENT_FOLDER)
+
     print(f"[^] Download folder: {album_folder}")
     print("-----------------------------------------")
     return base_url, album_folder
 
 
-def download_media(base_url, file_path, headers):
+def fetch_image_data(base_url):
     """
-    Download media from the given URL and save it to the specified file path.
+    Fetches image data from a given base URL.
 
     Args:
-    - base_url (str): The URL of the media to be downloaded.
-    - file_path (str): The file path where the media will be saved.
-    - headers (dict): HTTP headers to be included in the request.
+        base_url (str): The base URL to fetch the image data from.
 
     Returns:
-    - success (bool): True if the download is successful, False otherwise.
-    - file_path (str): The file path where the media is saved if the download is
-      successful, or an error message if the download fails.
+        list: A list of image data extracted from the HTML content.
+
+    Raises:
+        None
+
     """
+    response = requests.get(base_url, timeout=None)
+    if response.status_code != 200:
+        print("[!] Failed to open URL.")
+        return None
+
+    soup = BeautifulSoup(response.content, 'html.parser')
+    data = soup.find_all('div', class_='grid-images_box')
+    if not data:
+        print("[!] Failed to grab file URLs.")
+        return None
+
+    return data
+
+
+def create_download_folder(base_path):
+    """
+    Create a download folder at the specified base path if it doesn't exist.
+
+    Args:
+        base_path (str): The base path where the download folder will be created.
+
+    Returns:
+        str: The path of the created download folder.
+    """
+    path = os.path.join(os.getcwd(), base_path)
+
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+    return path
+
+
+def download_media(args):
+    """
+    Downloads media from a given URL and saves it to a specified path.
+
+    Args:
+        args (tuple): A tuple containing the following elements:
+            - urls (str): The URL of the media to be downloaded.
+            - path (str): The path where the downloaded media will be saved.
+            - headers (dict): Optional headers to be included in the request.
+
+    Returns:
+        tuple: A tuple containing the following elements:
+            - success (bool): Indicates whether the download was successful.
+            - file_path (str): The path of the downloaded file if successful,
+            or an error message if unsuccessful.
+    """
+    urls, path, headers = args
+    file_path = os.path.join(path, os.path.basename(urls))
+
     try:
         response = requests.get(
-            base_url,
+            urls,
             headers=headers,
             stream=True,
             timeout=None)
@@ -68,63 +121,61 @@ def download_media(base_url, file_path, headers):
                     progress_bar.update(len(data))
 
             return True, file_path
-        else:
-            return(
-                False,
-                f"[!] Failed to download '{file_path}'. Status code: {response.status_code}"
-            )
+        return (
+            False, f"[!] Failed to download '{file_path}'. Status code: {response.status_code}"
+        )
     except requests.exceptions.RequestException as e:
         return False, f"[!] Failed to download '{file_path}': {e}"
     except IOError as e:
         return False, f"[!] Failed to download '{file_path}': {e}"
 
 
-def main(base_url, base_path):
+def generate_download_urls(d):
     """
-    Main function to download media from the bunkrr Album.
+    Generate download URLs for the given data.
 
     Args:
-    - base_url (str): The bunkrr Album URL.
-    - base_path (str): The download folder path.
+        d (list): A list of data.
 
-    Prints the number of downloaded files and failed files.
+    Returns:
+        list: A list of download URLs.
     """
-    response = requests.get(base_url, timeout=None)
-    if response.status_code != 200:
-        print("[!] Failed to open URL.")
-        return
+    urls = [
+        data.find('img')['src'].replace('/thumbs/', '/').rsplit('.', 1)[0] +
+        os.path.splitext(data.find('p').text.strip())[1]
+        for data in d
+    ]
+    return urls
 
-    soup = BeautifulSoup(response.content, 'html.parser')
-    image_data = soup.find_all('div', class_='grid-images_box')
-    if not image_data:
-        print("[!] Failed grab file url.")
-        return
 
-    folder_path = os.path.join(os.getcwd(), base_path)
+def download_images_from_urls(urls, album_folder):
+    """
+    Download images from a list of URLs and save them in the specified album folder.
 
-    if not os.path.exists(folder_path):
-        os.makedirs(folder_path)
+    Args:
+        urls (list): A list of URLs pointing to the images to be downloaded.
+        album_folder (str): The path to the folder where the downloaded images will be saved.
 
-    download_urls = []
-    for data in image_data:
-        img_src = data.find('img')['src']
-        first_paragraph = data.find('p').text.strip()
-        file_extension = os.path.splitext(first_paragraph)[1]
-        modified_url = img_src.replace(
-            '/thumbs/', '/').rsplit('.', 1)[0] + file_extension
-        download_urls.append(modified_url)
+    Returns:
+        tuple: A tuple containing two lists:
+            - A list of successfully downloaded files.
+            - A list of files that failed to download.
 
+    Example:
+        urls = ['https://example.com/image1.jpg', 'https://example.com/image2.jpg']
+        album_folder = '/path/to/album'
+        downloaded_files, failed_files = download_images_from_urls(urls, album_folder)
+    """
     user_agent = UserAgent()
     headers = {"User-Agent": user_agent.random}
 
     with ThreadPoolExecutor(max_workers=10) as executor:
         future_results = {
-            executor.submit(
-                download_media,
-                url,
-                os.path.join(folder_path, os.path.basename(url)),
-                headers
-            ): url for url in download_urls
+            executor.submit(download_media,
+                            (url,
+                             album_folder,
+                             headers)
+                            ): url for url in urls
         }
 
         results = [future.result() for future in as_completed(future_results)]
@@ -141,7 +192,13 @@ def main(base_url, base_path):
         print(f"\n[^] Downloaded: {downloaded_count} {downloaded_plural}, "
               f"Failed: {failed_count} {failed_plural}.")
 
+    return downloaded_files, failed_files
+
 
 if __name__ == "__main__":
     url, folder_name = get_user_input()
-    main(url, folder_name)
+    image_data = fetch_image_data(url)
+    if image_data:
+        folder_path = create_download_folder(folder_name)
+        download_urls = generate_download_urls(image_data)
+        download_images_from_urls(download_urls, folder_path)
