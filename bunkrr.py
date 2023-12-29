@@ -1,5 +1,6 @@
 """script to download media from bunkrr Album."""
 import os
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from validators import url as validate_url
 import requests
@@ -43,13 +44,11 @@ def get_user_input():
     """
     print("-----------------------------------------")
     base_url = input("[?] Enter bunkrr Album URL: ")
-    album_folder_input = input("[?] Enter album folder name: ")
-
     if not base_url:
         raise ValueError("Bunkrr Album URL cannot be empty!")
-
     if not validate_url(base_url):
         raise ValueError("Invalid URL format! Please enter a valid URL.")
+    album_folder_input = input("[?] Enter album folder name: ")
 
     if album_folder_input.strip():
         album_folder = os.path.join(
@@ -69,24 +68,25 @@ def fetch_image_data(base_url):
     Fetches image data from a given base URL.
 
     Args:
-        base_url (str): The base URL to fetch the image data from.
+        base_url (str): The base URL to fetch image data from.
 
     Returns:
         list: A list of image data extracted from the HTML content.
 
     Raises:
-        None
-
+        requests.RequestException: If there is an error while making the HTTP request.
     """
-    response = requests.get(base_url, timeout=None)
-    if response.status_code != 200:
-        print("[!] Failed to open URL.")
-        return None
+    try:
+        response = requests.get(base_url, timeout=None)
+        response.raise_for_status()
 
-    soup = BeautifulSoup(response.content, 'html.parser')
-    data = soup.find_all('div', class_='grid-images_box')
-    if not data:
-        print("[!] Failed to grab file URLs.")
+        soup = BeautifulSoup(response.content, 'html.parser')
+        data = soup.find_all('div', class_='grid-images_box')
+        if not data:
+            print("[!] Failed to grab file URLs.")
+            return None
+    except requests.RequestException as e:
+        print(f"[!] Error: {e}")
         return None
 
     return data
@@ -227,14 +227,22 @@ def download_images_from_urls(urls, album_folder):
 
 if __name__ == "__main__":
     while True:
-        url, folder_name = get_user_input()
-        image_data = fetch_image_data(url)
-        if image_data:
-            folder_path = create_download_folder(folder_name)
-            download_urls = generate_download_urls(image_data)
-            download_images_from_urls(download_urls, folder_path)
-            download_again = input(
-                "[?] Do you want to download again? (Y/N, default N): ").lower()
+        while True:
+            url, folder_name = get_user_input()
+            image_data = fetch_image_data(url)
+            if image_data is not None:
+                break
+            user_choice = input(
+                "[!] Error fetching image data, Do you want to retry? (Y/N, default N): "
+            ).lower() or 'n'
+            if user_choice not in ['y', 'yes']:
+                sys.exit(1)
 
-        if download_again not in ['y', 'yes', 't']:
+        folder_path = create_download_folder(folder_name)
+        download_urls = generate_download_urls(image_data)
+        download_images_from_urls(download_urls, folder_path)
+        download_again = input(
+            "[?] Do you want to download again? (Y/N, default N): ").lower() or 'n'
+
+        if download_again not in ['y', 'yes']:
             break
