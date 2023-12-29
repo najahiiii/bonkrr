@@ -1,6 +1,7 @@
 """script to download media from bunkrr Album."""
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from validators import url as validate_url
 import requests
 from bs4 import BeautifulSoup
 from tqdm import tqdm
@@ -9,17 +10,46 @@ from fake_useragent import UserAgent
 DEFAULT_PARENT_FOLDER = 'downloads'
 
 
-def get_user_input():
+def validate_input(func):
     """
-    Prompt the user to enter the bunkrr Album URL and album folder name.
-    If the album folder name is not provided, the default parent folder will be used.
+    Decorator function that validates the input of a given function.
+
+    Args:
+        func: The function to be decorated.
 
     Returns:
-        tuple: A tuple containing the bunkrr Album URL and the album folder path.
+        The decorated function.
+    """
+    def wrapper(*args, **kwargs):
+        while True:
+            try:
+                return func(*args, **kwargs)
+            except ValueError as ve:
+                print(f"[!] Error: {ve}")
+    return wrapper
+
+
+@validate_input
+def get_user_input():
+    """
+    Prompts the user to enter the bunkrr Album URL and album folder name.
+    Validates the input and returns the base URL and album folder path.
+
+    Raises:
+        ValueError: If the bunkrr Album URL is empty or has an invalid format.
+
+    Returns:
+        tuple: A tuple containing the base URL and album folder path.
     """
     print("-----------------------------------------")
     base_url = input("[?] Enter bunkrr Album URL: ")
     album_folder_input = input("[?] Enter album folder name: ")
+
+    if not base_url:
+        raise ValueError("Bunkrr Album URL cannot be empty!")
+
+    if not validate_url(base_url):
+        raise ValueError("Invalid URL format! Please enter a valid URL.")
 
     if album_folder_input.strip():
         album_folder = os.path.join(
