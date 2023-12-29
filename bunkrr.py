@@ -6,20 +6,30 @@ from bs4 import BeautifulSoup
 from tqdm import tqdm
 from fake_useragent import UserAgent
 
+DEFAULT_PARENT_FOLDER = 'downloads'
+
 
 def get_user_input():
     """
-    Prompt the user to enter the bunkrr Album URL and download folder path.
+    Prompt the user to enter the bunkrr Album URL and album folder name,
+    and return them as a tuple.
 
     Returns:
-    - base_url (str): The bunkrr Album URL entered by the user.
-    - base_path (str): The download folder path entered by the user.
+        tuple: A tuple containing the bunkrr Album URL and album folder name.
     """
     print("-----------------------------------------")
     base_url = input("[?] Enter bunkrr Album URL: ")
-    base_path = input("[?] Enter download folder: ")
+    album_folder_input = input("[?] Enter album folder name: ")
+    if album_folder_input.strip():
+        album_folder = os.path.join(
+            os.getcwd(),
+            DEFAULT_PARENT_FOLDER,
+            album_folder_input.strip())
+    else:
+        album_folder = os.path.join(os.getcwd(), DEFAULT_PARENT_FOLDER)
+    print(f"[^] Download folder: {album_folder}")
     print("-----------------------------------------")
-    return base_url, base_path
+    return base_url, album_folder
 
 
 def download_media(base_url, file_path, headers):
