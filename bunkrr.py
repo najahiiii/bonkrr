@@ -11,6 +11,28 @@ from fake_useragent import UserAgent
 DEFAULT_PARENT_FOLDER = 'downloads'
 
 
+def user_input(prompt):
+    """
+    Prompt the user for input and handle the response.
+
+    Args:
+        prompt (str): The prompt to display to the user.
+
+    Returns:
+        None
+
+    Raises:
+        SystemExit: If the user enters 'n' or an empty string.
+    """
+    i = input(prompt).strip().lower()
+    if i == 'y':
+        return
+    if i == 'n' or not i:
+        sys.exit(1)
+    else:
+        sys.exit(1)
+
+
 def validate_input(func):
     """
     Decorator function that validates the input of a given function.
@@ -232,17 +254,14 @@ if __name__ == "__main__":
             image_data = fetch_image_data(url)
             if image_data is not None:
                 break
-            user_choice = input(
-                "[!] Error fetching image data, Do you want to retry? (Y/N, default N): "
-            ).lower() or 'n'
-            if user_choice not in ['y', 'yes']:
-                sys.exit(1)
+            user_input(
+                "[!] Error fetching data, Do you want to retry? (Y/N, default N): "
+            )
 
         folder_path = create_download_folder(folder_name)
         download_urls = generate_download_urls(image_data)
         download_images_from_urls(download_urls, folder_path)
-        download_again = input(
-            "[?] Do you want to download again? (Y/N, default N): ").lower() or 'n'
 
-        if download_again not in ['y', 'yes']:
-            break
+        user_input(
+            "[?] Do you want to download again? (Y/N, default N): "
+        )
