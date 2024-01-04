@@ -1,18 +1,19 @@
 #!/usr/bin/python3
-"""script to download media from bunkrr Album."""
+"""Script to download media from bunkrr Album."""
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
 from validators import url as validate_url
-import requests
+import aiohttp
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 from fake_useragent import UserAgent
 
-DEFAULT_PARENT_FOLDER = 'downloads'
+DEFAULT_PARENT_FOLDER = 'downloads' # Default folder name for downloaded media
+MAX_CONCURRENT_DOWNLOADS = 16   # Maximum number of concurrent downloads
 
 
-def user_input(prompt):
+async def user_input(prompt):
     """
     Prompt the user for input and handle the response.
 
@@ -86,29 +87,42 @@ def get_user_input():
     return base_url, album_folder
 
 
-def fetch_image_data(base_url):
+def get_random_user_agent():
+    """
+    Get a random User-Agent string.
+
+    Returns:
+        str: A randomly selected User-Agent string.
+    """
+    ua = UserAgent()
+    return ua.random
+
+
+async def fetch_image_data(session, base_url):
     """
     Fetches image data from a given base URL.
 
     Args:
+        session: The aiohttp ClientSession object.
         base_url (str): The base URL to fetch image data from.
 
     Returns:
         list: A list of image data extracted from the HTML content.
 
     Raises:
-        requests.RequestException: If there is an error while making the HTTP request.
+        aiohttp.ClientResponseError: If there is an error while making the HTTP request.
     """
     try:
-        response = requests.get(base_url, timeout=None)
-        response.raise_for_status()
+        async with session.get(base_url) as response:
+            response.raise_for_status()
+            html = await response.text()
 
-        soup = BeautifulSoup(response.content, 'html.parser')
-        data = soup.find_all('div', class_='grid-images_box')
-        if not data:
-            print("[!] Failed to grab file URLs.")
-            return None
-    except requests.RequestException as e:
+            soup = BeautifulSoup(html, 'html.parser')
+            data = soup.find_all('div', class_='grid-images_box')
+            if not data:
+                print("[!] Failed to grab file URLs.")
+                return None
+    except aiohttp.ClientResponseError as e:
         print(f"[!] Error: {e}")
         return None
 
@@ -133,108 +147,80 @@ def create_download_folder(base_path):
     return path
 
 
-def download_media(args):
+async def download_media(session, url, path):
     """
-    Downloads media from a given URL and saves it to a specified path.
+    Downloads media from the given URL and saves it to the specified path.
 
     Args:
-        args (tuple): A tuple containing the following elements:
-            - urls (str): The URL of the media to be downloaded.
-            - path (str): The path where the downloaded media will be saved.
-            - headers (dict): Optional headers to be included in the request.
+        session (aiohttp.ClientSession): The aiohttp client session.
+        url (str): The URL of the media to download.
+        path (str): The path where the downloaded media will be saved.
 
     Returns:
-        tuple: A tuple containing the following elements:
-            - success (bool): Indicates whether the download was successful.
-            - file_path (str): The path of the downloaded file if successful,
-            or an error message if unsuccessful.
+        bool: True if the media is successfully downloaded and saved, False otherwise.
     """
-    urls, path, headers = args
-    file_path = os.path.join(path, os.path.basename(urls))
+    file_path = os.path.join(path, os.path.basename(url))
 
     try:
-        response = requests.get(
-            urls,
-            headers=headers,
-            stream=True,
-            timeout=None)
-        if response.status_code == 200:
-            file_size = int(response.headers.get('content-length', 0))
+        headers = {"User-Agent": get_random_user_agent()}
+        async with session.get(url, headers=headers) as response:
+            if response.status == 200:
+                file_size = int(response.headers.get('content-length', 0))
 
-            with open(file_path, "wb") as file, tqdm(
-                desc=os.path.basename(file_path),
-                total=file_size,
-                unit='B',
-                unit_scale=True,
-                unit_divisor=1024,
-                leave=False
-            ) as progress_bar:
-                for data in response.iter_content(chunk_size=1024):
-                    file.write(data)
-                    progress_bar.update(len(data))
+                with open(file_path, "wb") as file, tqdm(
+                    desc=os.path.basename(file_path),
+                    total=file_size,
+                    unit='B',
+                    unit_scale=True,
+                    unit_divisor=1024,
+                    leave=False
+                ) as progress_bar:
+                    while True:
+                        chunk = await response.content.read(1024)
+                        if not chunk:
+                            break
+                        file.write(chunk)
+                        progress_bar.update(len(chunk))
 
-            return True, file_path
-        return (
-            False, f"[!] Failed to download '{file_path}'. Status code: {response.status_code}"
-        )
-    except requests.exceptions.RequestException as e:
-        return False, f"[!] Failed to download '{file_path}': {e}"
-    except IOError as e:
-        return False, f"[!] Failed to download '{file_path}': {e}"
+                return True
+            return False
+    except aiohttp.ClientError as e:
+        print(f"[!] Failed to download '{file_path}': {e}")
+        return False
 
 
-def generate_download_urls(d):
+async def download_images_from_urls(urls, album_folder,
+                                    max_concurrent_downloads=MAX_CONCURRENT_DOWNLOADS):
     """
-    Generate download URLs for the given data.
+    Downloads images from a list of URLs asynchronously.
 
     Args:
-        d (list): A list of data.
+        urls (list): A list of image URLs to download.
+        album_folder (str): The folder where the downloaded images will be saved.
+        max_concurrent_downloads (int): The maximum number of concurrent downloads.
 
     Returns:
-        list: A list of download URLs.
+        tuple: A tuple containing two lists - downloaded_files and failed_files.
+            downloaded_files (list): A list of URLs that were successfully downloaded.
+            failed_files (list): A list of URLs that failed to download.
     """
-    urls = [
-        data.find('img')['src'].replace('/thumbs/', '/').rsplit('.', 1)[0] +
-        os.path.splitext(data.find('p').text.strip())[1]
-        for data in d
-    ]
-    return urls
+    async with aiohttp.ClientSession() as session:
+        semaphore = asyncio.Semaphore(max_concurrent_downloads)
 
+        async def download_media_wrapper(url):
+            async with semaphore:
+                return await download_media(session, url, album_folder)
 
-def download_images_from_urls(urls, album_folder):
-    """
-    Download images from a list of URLs and save them in the specified album folder.
+        tasks = [download_media_wrapper(url) for url in urls]
+        print(f"[+] Total file: {len(tasks)}")
+        results = await asyncio.gather(*tasks)
 
-    Args:
-        urls (list): A list of URLs pointing to the images to be downloaded.
-        album_folder (str): The path to the folder where the downloaded images will be saved.
-
-    Returns:
-        tuple: A tuple containing two lists:
-            - A list of successfully downloaded files.
-            - A list of files that failed to download.
-
-    Example:
-        urls = ['https://example.com/image1.jpg', 'https://example.com/image2.jpg']
-        album_folder = '/path/to/album'
-        downloaded_files, failed_files = download_images_from_urls(urls, album_folder)
-    """
-    user_agent = UserAgent()
-    headers = {"User-Agent": user_agent.random}
-
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        future_results = {
-            executor.submit(download_media,
-                            (url,
-                             album_folder,
-                             headers)
-                            ): url for url in urls
-        }
-
-        results = [future.result() for future in as_completed(future_results)]
-
-        downloaded_files = [message for success, message in results if success]
-        failed_files = [message for success, message in results if not success]
+        downloaded_files = [
+            url for url, success in zip(
+                urls, results) if success]
+        failed_files = [
+            url for url, success in zip(
+                urls, results) if not success]
 
         downloaded_count = len(downloaded_files)
         failed_count = len(failed_files)
@@ -248,21 +234,40 @@ def download_images_from_urls(urls, album_folder):
     return downloaded_files, failed_files
 
 
-if __name__ == "__main__":
+async def download_images():
+    """
+    Downloads images from a given URL and saves them to a specified folder.
+
+    Returns:
+        None
+    """
+    while True:
+        url, folder_name = get_user_input()
+        async with aiohttp.ClientSession() as session:
+            image_data = await fetch_image_data(session, url)
+        if image_data is not None:
+            break
+        await user_input("[!] Error fetching data, Retry? (Y/N, default N): ")
+
+    folder_path = create_download_folder(folder_name)
+    download_urls = [data.find('img')['src'].replace('/thumbs/', '/').rsplit('.', 1)[0] +
+                     os.path.splitext(data.find('p').text.strip())[1] for data in image_data]
+    await download_images_from_urls(download_urls, folder_path, MAX_CONCURRENT_DOWNLOADS)
+
+
+async def main():
+    """
+    This is the main function that controls the execution flow of the program.
+    It continuously downloads images and prompts the user
+    for input to determine if the download should be repeated.
+    """
     while True:
         while True:
-            url, folder_name = get_user_input()
-            image_data = fetch_image_data(url)
-            if image_data is not None:
-                break
-            user_input(
-                "[!] Error fetching data, Do you want to retry? (Y/N, default N): "
+            await download_images()
+            await user_input(
+                "[?] Do you want to download again? (Y/N, default N): "
             )
 
-        folder_path = create_download_folder(folder_name)
-        download_urls = generate_download_urls(image_data)
-        download_images_from_urls(download_urls, folder_path)
 
-        user_input(
-            "[?] Do you want to download again? (Y/N, default N): "
-        )
+if __name__ == "__main__":
+    asyncio.run(main())
