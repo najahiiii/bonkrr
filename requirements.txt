@@ -1,5 +1,4 @@
 aiohttp==3.9.1
 beautifulsoup4==4.12.2
-fake_useragent==1.4.0
+fake-useragent==1.4.0
 tqdm==4.66.1
-validators==0.22.0
