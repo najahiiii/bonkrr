@@ -3,28 +3,28 @@
 import os
 import sys
 import asyncio
-from validators import url as validate_url
 import aiohttp
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 from fake_useragent import UserAgent
 
-DEFAULT_PARENT_FOLDER = 'downloads' # Default folder name for downloaded media
-MAX_CONCURRENT_DOWNLOADS = 16   # Maximum number of concurrent downloads
+DEFAULT_PARENT_FOLDER = 'downloads'  # Default folder name for downloaded media
+MAX_CONCURRENT_DOWNLOADS = 16  # Maximum number of concurrent downloads
 
 
-async def user_input(prompt):
+async def choices(prompt):
     """
-    Prompt the user for input and handle the response.
+    Prompt the user with a message and return based on their input.
 
     Args:
-        prompt (str): The prompt to display to the user.
+        prompt (str): The message to display to the user.
 
     Returns:
-        None
+        None: If the user enters 'y'.
+        None: If the user enters 'n' or leaves the input empty.
 
     Raises:
-        SystemExit: If the user enters 'n' or an empty string.
+        SystemExit: If the user enters any other input.
     """
     i = input(prompt).strip().lower()
     if i == 'y':
@@ -35,44 +35,21 @@ async def user_input(prompt):
         sys.exit(1)
 
 
-def validate_input(func):
+def get_user_folder():
     """
-    Decorator function that validates the input of a given function.
+    Prompts the user to enter an album folder name and returns the path of the folder.
 
-    Args:
-        func: The function to be decorated.
+    If the user enters a folder name, it is appended to the current working directory
+    and the default parent folder.
+    If the user leaves the input blank, the default parent folder is appended to
+    the current working directory.
 
     Returns:
-        The decorated function.
+        str: The path of the album folder.
     """
-    def wrapper(*args, **kwargs):
-        while True:
-            try:
-                return func(*args, **kwargs)
-            except ValueError as ve:
-                print(f"[!] Error: {ve}")
-    return wrapper
-
-
-@validate_input
-def get_user_input():
-    """
-    Prompts the user to enter the bunkrr Album URL and album folder name.
-    Validates the input and returns the base URL and album folder path.
-
-    Raises:
-        ValueError: If the bunkrr Album URL is empty or has an invalid format.
-
-    Returns:
-        tuple: A tuple containing the base URL and album folder path.
-    """
-    print("-----------------------------------------")
-    base_url = input("[?] Enter bunkrr Album URL: ")
-    if not base_url:
-        raise ValueError("Bunkrr Album URL cannot be empty!")
-    if not validate_url(base_url):
-        raise ValueError("Invalid URL format! Please enter a valid URL.")
-    album_folder_input = input("[?] Enter album folder name: ")
+    album_folder_input = input(
+        "[?] Enter album folder name (or leave blank to use default): "
+    ).strip()
 
     if album_folder_input.strip():
         album_folder = os.path.join(
@@ -83,16 +60,14 @@ def get_user_input():
         album_folder = os.path.join(os.getcwd(), DEFAULT_PARENT_FOLDER)
 
     print(f"[^] Download folder: {album_folder}")
-    print("-----------------------------------------")
-    return base_url, album_folder
+    return album_folder
 
 
 def get_random_user_agent():
     """
-    Get a random User-Agent string.
+    Returns a random user agent string.
 
-    Returns:
-        str: A randomly selected User-Agent string.
+    :return: A random user agent string.
     """
     ua = UserAgent()
     return ua.random
@@ -100,17 +75,18 @@ def get_random_user_agent():
 
 async def fetch_image_data(session, base_url):
     """
-    Fetches image data from a given base URL.
+    Fetches image data from a given base URL using an async session.
 
     Args:
-        session: The aiohttp ClientSession object.
+        session (aiohttp.ClientSession): The async session used for making HTTP requests.
         base_url (str): The base URL to fetch image data from.
 
     Returns:
-        list: A list of image data extracted from the HTML content.
+        list: A list of image data extracted from the HTML response.
 
     Raises:
-        aiohttp.ClientResponseError: If there is an error while making the HTTP request.
+        aiohttp.ClientResponseError: If there is an error in the HTTP response.
+
     """
     try:
         async with session.get(base_url) as response:
@@ -129,27 +105,54 @@ async def fetch_image_data(session, base_url):
     return data
 
 
-def create_download_folder(base_path):
+async def fetch_album_info(session, base_url):
     """
-    Create a download folder at the specified base path if it doesn't exist.
+    Fetches album information from a given URL.
+
+    Args:
+        session (aiohttp.ClientSession): The aiohttp client session.
+        base_url (str): The base URL to fetch the album information from.
+
+    Returns:
+        str: The name of the album if found, None otherwise.
+    """
+    try:
+        async with session.get(base_url) as response:
+            response.raise_for_status()
+            html = await response.text()
+
+            soup = BeautifulSoup(html, 'html.parser')
+            album_info = soup.find('div', class_='mb-12-xxx')
+            if album_info:
+                album_name = album_info.find('h1').text.strip()
+                return album_name
+            else:
+                return None
+    except aiohttp.ClientResponseError as e:
+        print(f"[!] Error: {e}")
+        return None
+
+
+async def create_download_folder(base_path, folder_name):
+    """
+    Create a download folder at the specified base path with the given folder name.
 
     Args:
         base_path (str): The base path where the download folder will be created.
+        folder_name (str): The name of the download folder.
 
     Returns:
         str: The path of the created download folder.
     """
-    path = os.path.join(os.getcwd(), base_path)
-
+    path = os.path.join(base_path, folder_name)
     if not os.path.exists(path):
         os.makedirs(path)
-
     return path
 
 
 async def download_media(session, url, path):
     """
-    Downloads media from the given URL and saves it to the specified path.
+    Downloads media from a given URL and saves it to the specified path.
 
     Args:
         session (aiohttp.ClientSession): The aiohttp client session.
@@ -157,7 +160,7 @@ async def download_media(session, url, path):
         path (str): The path where the downloaded media will be saved.
 
     Returns:
-        bool: True if the media is successfully downloaded and saved, False otherwise.
+        bool: True if the media was successfully downloaded and saved, False otherwise.
     """
     file_path = os.path.join(path, os.path.basename(url))
 
@@ -189,30 +192,27 @@ async def download_media(session, url, path):
         return False
 
 
-async def download_images_from_urls(urls, album_folder,
-                                    max_concurrent_downloads=MAX_CONCURRENT_DOWNLOADS):
+async def download_images_from_urls(urls, album_folder):
     """
     Downloads images from a list of URLs asynchronously.
 
     Args:
-        urls (list): A list of image URLs to download.
+        urls (list): A list of URLs of the images to be downloaded.
         album_folder (str): The folder where the downloaded images will be saved.
-        max_concurrent_downloads (int): The maximum number of concurrent downloads.
 
     Returns:
-        tuple: A tuple containing two lists - downloaded_files and failed_files.
-            downloaded_files (list): A list of URLs that were successfully downloaded.
-            failed_files (list): A list of URLs that failed to download.
+        tuple: A tuple containing two lists. The first list contains
+        the URLs of the successfully downloaded images, and the second list contains
+        the URLs of the images that failed to download.
     """
     async with aiohttp.ClientSession() as session:
-        semaphore = asyncio.Semaphore(max_concurrent_downloads)
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
         async def download_media_wrapper(url):
             async with semaphore:
                 return await download_media(session, url, album_folder)
 
         tasks = [download_media_wrapper(url) for url in urls]
-        print(f"[+] Total file: {len(tasks)}")
         results = await asyncio.gather(*tasks)
 
         downloaded_files = [
@@ -222,51 +222,73 @@ async def download_images_from_urls(urls, album_folder,
             url for url, success in zip(
                 urls, results) if not success]
 
-        downloaded_count = len(downloaded_files)
-        failed_count = len(failed_files)
-
-        downloaded_plural = 'file' if downloaded_count <= 1 else 'files'
-        failed_plural = 'file' if failed_count <= 1 else 'files'
-
-        print(f"\n[^] Downloaded: {downloaded_count} {downloaded_plural}, "
-              f"Failed: {failed_count} {failed_plural}.")
-
-    return downloaded_files, failed_files
+        return downloaded_files, failed_files
 
 
 async def download_images():
     """
-    Downloads images from a given URL and saves them to a specified folder.
+    Downloads images from bunkrr albums.
+
+    This function prompts the user to enter bunkrr album
+    URLs or provide a file path containing the URLs.
+    It then downloads the images from the specified albums and saves them in separate folders.
 
     Returns:
         None
     """
     while True:
-        url, folder_name = get_user_input()
-        async with aiohttp.ClientSession() as session:
-            image_data = await fetch_image_data(session, url)
-        if image_data is not None:
-            break
-        await user_input("[!] Error fetching data, Retry? (Y/N, default N): ")
+        urls = input(
+            "[?] Enter bunkrr Album URLs (Support multiple URLs separated by comma)"
+            " or provide a file path: "
+        ).strip()
+        if os.path.isfile(urls):
+            with open(urls, 'r', encoding='utf-8') as file:
+                urls = file.read().splitlines()
+        else:
+            urls = urls.split(',')
+        urls = [url.strip() for url in urls]
 
-    folder_path = create_download_folder(folder_name)
-    download_urls = [data.find('img')['src'].replace('/thumbs/', '/').rsplit('.', 1)[0] +
-                     os.path.splitext(data.find('p').text.strip())[1] for data in image_data]
-    await download_images_from_urls(download_urls, folder_path, MAX_CONCURRENT_DOWNLOADS)
+        parent_folder = get_user_folder()
+        count = 1
+        downloaded_total = 0
+        failed_total = 0
+
+        for url in urls:
+            async with aiohttp.ClientSession() as session:
+                album_info = await fetch_album_info(session, url)
+                if album_info:
+                    print(f"\n[*] Downloading images from album: {album_info}")
+                image_data = await fetch_image_data(session, url)
+                if image_data is not None:
+                    folder_name = str(count)
+                    folder_path = await create_download_folder(parent_folder, folder_name)
+                    download_urls = [
+                        data.find('img')['src'].replace('/thumbs/', '/').rsplit('.', 1)[0] +
+                        os.path.splitext(data.find('p').text.strip())[1] for data in image_data
+                    ]
+                    downloaded, failed = await download_images_from_urls(download_urls, folder_path)
+                    downloaded_total += len(downloaded)
+                    failed_total += len(failed)
+                    count += 1
+
+        downloaded_plural = 'file' if downloaded_total <= 1 else 'files'
+        failed_plural = 'file' if failed_total <= 1 else 'files'
+
+        print(f"\n[^] Downloaded: {downloaded_total} {downloaded_plural}, "
+              f"Failed: {failed_total} {failed_plural}.")
+
+        await choices("[?] Do you want to download again? (Y/N, default N): ")
 
 
 async def main():
     """
-    This is the main function that controls the execution flow of the program.
-    It continuously downloads images and prompts the user
-    for input to determine if the download should be repeated.
+    This is the main function of the program.
+    It downloads images and prompts the user for a choice.
     """
     while True:
         while True:
             await download_images()
-            await user_input(
-                "[?] Do you want to download again? (Y/N, default N): "
-            )
+            await choices("[?] Do you want to download again? (Y/N, default N): ")
 
 
 if __name__ == "__main__":
