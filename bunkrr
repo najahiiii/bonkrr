@@ -111,7 +111,7 @@ async def fetch_album_info(session, base_url):
 
     Args:
         session (aiohttp.ClientSession): The aiohttp client session.
-        base_url (str): The base URL to fetch the album information from.
+        base_url (str): The base URL to fetch album information from.
 
     Returns:
         str: The name of the album if found, None otherwise.
@@ -126,33 +126,41 @@ async def fetch_album_info(session, base_url):
             if album_info:
                 album_name = album_info.find('h1').text.strip()
                 return album_name
-            else:
-                return None
+            return None
     except aiohttp.ClientResponseError as e:
         print(f"[!] Error: {e}")
         return None
 
 
-async def create_download_folder(base_path, folder_name):
+async def create_download_folder(base_path, *args):
     """
-    Create a download folder at the specified base path with the given folder name.
+    Create a download folder at the specified base path.
 
     Args:
-        base_path (str): The base path where the download folder will be created.
-        folder_name (str): The name of the download folder.
+        base_path (str): The base path where the download folder should be created.
+        *args: Variable number of arguments representing the folder name or subdirectories.
 
     Returns:
         str: The path of the created download folder.
+
     """
-    path = os.path.join(base_path, folder_name)
-    if not os.path.exists(path):
-        os.makedirs(path)
+    if len(args) == 1:
+        folder_name = args[0]
+        path = os.path.join(base_path, folder_name)
+        if not os.path.exists(path):
+            os.makedirs(path)
+    else:
+        folder_name = os.path.join(base_path, *args)
+        if not os.path.exists(folder_name):
+            os.makedirs(folder_name)
+        path = folder_name
+
     return path
 
 
 async def download_media(session, url, path):
     """
-    Downloads media from a given URL and saves it to the specified path.
+    Downloads media from the given URL and saves it to the specified path.
 
     Args:
         session (aiohttp.ClientSession): The aiohttp client session.
@@ -160,9 +168,11 @@ async def download_media(session, url, path):
         path (str): The path where the downloaded media will be saved.
 
     Returns:
-        bool: True if the media was successfully downloaded and saved, False otherwise.
+        tuple: A tuple containing a boolean indicating whether the download was successful
+               and an error message if the download failed.
     """
     file_path = os.path.join(path, os.path.basename(url))
+    error_message = None
 
     try:
         headers = {"User-Agent": get_random_user_agent()}
@@ -185,11 +195,12 @@ async def download_media(session, url, path):
                         file.write(chunk)
                         progress_bar.update(len(chunk))
 
-                return True
-            return False
+                return True, None
+            return False, None
     except aiohttp.ClientError as e:
-        print(f"[!] Failed to download '{file_path}': {e}")
-        return False
+        error_message = f"\n[!] Failed to download '{file_path}': {e}"
+
+    return False, error_message
 
 
 async def download_images_from_urls(urls, album_folder):
@@ -201,9 +212,10 @@ async def download_images_from_urls(urls, album_folder):
         album_folder (str): The folder where the downloaded images will be saved.
 
     Returns:
-        tuple: A tuple containing two lists. The first list contains
-        the URLs of the successfully downloaded images, and the second list contains
-        the URLs of the images that failed to download.
+        tuple: A tuple containing three lists:
+            - downloaded_files: URLs of the successfully downloaded images.
+            - failed_files: URLs of the images that failed to download.
+            - error_messages: Error messages corresponding to the failed downloads.
     """
     async with aiohttp.ClientSession() as session:
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
@@ -216,13 +228,16 @@ async def download_images_from_urls(urls, album_folder):
         results = await asyncio.gather(*tasks)
 
         downloaded_files = [
-            url for url, success in zip(
-                urls, results) if success]
+            url for url, result in zip(urls, results) if result[0] is True
+        ]
         failed_files = [
-            url for url, success in zip(
-                urls, results) if not success]
+            url for url, result in zip(urls, results) if result[0] is False
+        ]
+        error_messages = [
+            result[1] for result in results if result[1] is not None
+        ]
 
-        return downloaded_files, failed_files
+        return downloaded_files, failed_files, error_messages
 
 
 async def download_images():
@@ -231,7 +246,7 @@ async def download_images():
 
     This function prompts the user to enter bunkrr album
     URLs or provide a file path containing the URLs.
-    It then downloads the images from the specified albums and saves them in separate folders.
+    It then downloads the images from the specified albums and saves them to the user's folder.
 
     Returns:
         None
@@ -249,33 +264,62 @@ async def download_images():
         urls = [url.strip() for url in urls]
 
         parent_folder = get_user_folder()
-        count = 1
         downloaded_total = 0
         failed_total = 0
+        error_messages = []
 
-        for url in urls:
+        if len(urls) == 1:
+            album_info = None
             async with aiohttp.ClientSession() as session:
-                album_info = await fetch_album_info(session, url)
+                album_info = await fetch_album_info(session, urls[0])
                 if album_info:
                     print(f"\n[*] Downloading images from album: {album_info}")
-                image_data = await fetch_image_data(session, url)
+                image_data = await fetch_image_data(session, urls[0])
                 if image_data is not None:
-                    folder_name = str(count)
-                    folder_path = await create_download_folder(parent_folder, folder_name)
+                    folder_path = await create_download_folder(parent_folder)
                     download_urls = [
                         data.find('img')['src'].replace('/thumbs/', '/').rsplit('.', 1)[0] +
                         os.path.splitext(data.find('p').text.strip())[1] for data in image_data
                     ]
-                    downloaded, failed = await download_images_from_urls(download_urls, folder_path)
+                    downloaded, failed, errors = await download_images_from_urls(
+                        download_urls, folder_path
+                    )
                     downloaded_total += len(downloaded)
                     failed_total += len(failed)
-                    count += 1
+                    error_messages.extend(errors)
+
+        else:
+            count = 1
+            for url in urls:
+                async with aiohttp.ClientSession() as session:
+                    album_info = await fetch_album_info(session, url)
+                    if album_info:
+                        print(
+                            f"\n[*] Downloading images from album: {album_info}")
+                    image_data = await fetch_image_data(session, url)
+                    if image_data is not None:
+                        folder_name = str(count)
+                        folder_path = await create_download_folder(parent_folder, folder_name)
+                        download_urls = [
+                            data.find('img')['src'].replace('/thumbs/', '/').rsplit('.', 1)[0] +
+                            os.path.splitext(data.find('p').text.strip())[1] for data in image_data
+                        ]
+                        downloaded, failed, errors = await download_images_from_urls(
+                            download_urls, folder_path
+                        )
+                        downloaded_total += len(downloaded)
+                        failed_total += len(failed)
+                        error_messages.extend(errors)
+                        count += 1
 
         downloaded_plural = 'file' if downloaded_total <= 1 else 'files'
         failed_plural = 'file' if failed_total <= 1 else 'files'
 
         print(f"\n[^] Downloaded: {downloaded_total} {downloaded_plural}, "
               f"Failed: {failed_total} {failed_plural}.")
+
+        for error_message in error_messages:
+            print(error_message)
 
         await choices("[?] Do you want to download again? (Y/N, default N): ")
 
