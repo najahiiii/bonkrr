@@ -3,7 +3,7 @@
 import os
 import sys
 import asyncio
-import aiohttp
+from aiohttp import ClientSession, client_exceptions
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 from fake_useragent import UserAgent
@@ -73,48 +73,17 @@ def get_random_user_agent():
     return ua.random
 
 
-async def fetch_image_data(session, base_url):
+async def fetch_data(session, base_url, data_type):
     """
-    Fetches image data from a given base URL using an async session.
-
-    Args:
-        session (aiohttp.ClientSession): The async session used for making HTTP requests.
-        base_url (str): The base URL to fetch image data from.
-
-    Returns:
-        list: A list of image data extracted from the HTML response.
-
-    Raises:
-        aiohttp.ClientResponseError: If there is an error in the HTTP response.
-
-    """
-    try:
-        async with session.get(base_url) as response:
-            response.raise_for_status()
-            html = await response.text()
-
-            soup = BeautifulSoup(html, 'html.parser')
-            data = soup.find_all('div', class_='grid-images_box')
-            if not data:
-                print("[!] Failed to grab file URLs.")
-                return None
-    except aiohttp.ClientResponseError as e:
-        print(f"[!] Error: {e}")
-        return None
-
-    return data
-
-
-async def fetch_album_info(session, base_url):
-    """
-    Fetches album information from a given URL.
+    Fetches either image data or album information from a given URL.
 
     Args:
         session (aiohttp.ClientSession): The aiohttp client session.
-        base_url (str): The base URL to fetch album information from.
+        base_url (str): The base URL to fetch data from.
+        data_type (str): Type of data to fetch ('image' or 'album').
 
     Returns:
-        str: The name of the album if found, None otherwise.
+        str or list: The name of the album if 'album' type or a list of image data.
     """
     try:
         async with session.get(base_url) as response:
@@ -122,13 +91,23 @@ async def fetch_album_info(session, base_url):
             html = await response.text()
 
             soup = BeautifulSoup(html, 'html.parser')
-            album_info = soup.find('div', class_='mb-12-xxx')
-            if album_info:
-                album_name = album_info.find('h1').text.strip()
-                return album_name
-            return None
-    except aiohttp.ClientResponseError as e:
-        print(f"[!] Error: {e}")
+            if data_type == 'album-name':
+                album_info = soup.find('div', class_='mb-12-xxx')
+                if album_info:
+                    album_name = album_info.find('h1').text.strip()
+                    return album_name
+                return None
+            if data_type == 'image-url':
+                data = soup.find_all('div', class_='grid-images_box')
+                if not data:
+                    print("\n[!] Failed to grab file URLs.")
+                    return None
+                return data
+    except client_exceptions.InvalidURL as e:
+        print(f"\n[!] Invalid URL: {e}")
+        return None
+    except client_exceptions.ClientError as ce:
+        print(f"\n[!] Client error: {ce}")
         return None
 
 
@@ -197,7 +176,7 @@ async def download_media(session, url, path):
 
                 return True, None
             return False, None
-    except aiohttp.ClientError as e:
+    except client_exceptions.ClientError as e:
         error_message = f"\n[!] Failed to download '{file_path}': {e}"
 
     return False, error_message
@@ -217,7 +196,7 @@ async def download_images_from_urls(urls, album_folder):
             - failed_files: URLs of the images that failed to download.
             - error_messages: Error messages corresponding to the failed downloads.
     """
-    async with aiohttp.ClientSession() as session:
+    async with ClientSession() as session:
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
         async def download_media_wrapper(url):
@@ -240,7 +219,7 @@ async def download_images_from_urls(urls, album_folder):
         return downloaded_files, failed_files, error_messages
 
 
-async def download_images():
+async def downloader():
     """
     Downloads images from bunkrr albums.
 
@@ -270,11 +249,11 @@ async def download_images():
 
         if len(urls) == 1:
             album_info = None
-            async with aiohttp.ClientSession() as session:
-                album_info = await fetch_album_info(session, urls[0])
+            async with ClientSession() as session:
+                album_info = await fetch_data(session, urls[0], 'album-name')
                 if album_info:
-                    print(f"\n[*] Downloading images from album: {album_info}")
-                image_data = await fetch_image_data(session, urls[0])
+                    print(f"\n[*] Downloading file(s) from album: {album_info}")
+                image_data = await fetch_data(session, urls[0], 'image-url')
                 if image_data is not None:
                     folder_path = await create_download_folder(parent_folder)
                     download_urls = [
@@ -291,12 +270,12 @@ async def download_images():
         else:
             count = 1
             for url in urls:
-                async with aiohttp.ClientSession() as session:
-                    album_info = await fetch_album_info(session, url)
+                async with ClientSession() as session:
+                    album_info = await fetch_data(session, url, 'album-name')
                     if album_info:
                         print(
-                            f"\n[*] Downloading images from album: {album_info}")
-                    image_data = await fetch_image_data(session, url)
+                            f"\n[*] Downloading file(s) from album: {album_info}")
+                    image_data = await fetch_data(session, url, 'image-url')
                     if image_data is not None:
                         folder_name = str(count)
                         folder_path = await create_download_folder(parent_folder, folder_name)
@@ -329,10 +308,12 @@ async def main():
     This is the main function of the program.
     It downloads images and prompts the user for a choice.
     """
-    while True:
+    try:
         while True:
-            await download_images()
-            await choices("[?] Do you want to download again? (Y/N, default N): ")
+            await downloader()
+    except KeyboardInterrupt:
+        print("\n[!] Exiting...")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
