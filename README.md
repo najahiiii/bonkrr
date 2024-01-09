@@ -39,15 +39,10 @@ The script fetches image data from a bunkrr Album URL provided by the user and p
 
 1. Run the script:
    ```bash
-   python3 bunkrr
+   python3 -m bunkrr
    ```
 2. Enter the bunkrr Album URL and the download folder path as prompted.
 3. The script will begin fetching and downloading the media files. The progress will be displayed.
-
-## Configuration
-
-- `DEFAULT_PARENT_FOLDER`: Default folder name for downloaded media.
-- `MAX_CONCURRENT_DOWNLOADS`: Maximum number of concurrent downloads.
 
 ## Contributors
    - <a href="https://github.com/najahiiii/bonkrr/graphs/contributors" target="_blank">Contributors</a>.

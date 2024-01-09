@@ -160,4 +160,4 @@ cython_debug/
 #.idea/
 
 # download folders
-downloads/
+downloads/*
