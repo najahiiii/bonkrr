@@ -1,7 +1,7 @@
 """Data processing functions for bunkrr."""
 import os
 import asyncio
-from aiohttp import ClientSession, client_exceptions
+from aiohttp import ClientSession, ClientTimeout, client_exceptions
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 from fake_useragent import UserAgent
@@ -141,7 +141,8 @@ async def download_images_from_urls(urls, album_folder):
             - failed_files: URLs of the images that failed to download.
             - error_messages: Error messages corresponding to the failed downloads.
     """
-    async with ClientSession() as session:
+    timeout = ClientTimeout(total=None)
+    async with ClientSession(timeout=timeout) as session:
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
         async def download_media_wrapper(url):
