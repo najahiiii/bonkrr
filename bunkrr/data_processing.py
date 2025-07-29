@@ -43,7 +43,7 @@ async def fetch_data(session, base_url, data_type):
                     return album_name
                 return None
             if data_type == 'image-url':
-                data = soup.find_all('div', class_='grid-images_box')
+                data = soup.find_all('div', class_='grid-images_box-txt')
                 if not data:
                     print("\n[!] Failed to grab file URLs.")
                     return None
