@@ -91,4 +91,5 @@ async def downloader():
         for error_message in error_messages:
             print(error_message)
 
-        await choices("[?] Do you want to download again? (Y/N, default N): ")
+        if not choices("[?] Do you want to download again? (Y/N, default N): "):
+            break

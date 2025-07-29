@@ -5,7 +5,7 @@ import sys
 
 DEFAULT_PARENT_FOLDER = 'downloads'
 
-async def choices(prompt):
+def choices(prompt):
     """
     Prompt the user with a message and return based on their input.
 
