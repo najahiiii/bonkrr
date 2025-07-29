@@ -37,7 +37,7 @@ async def fetch_data(session, base_url, data_type):
 
             soup = BeautifulSoup(html, 'html.parser')
             if data_type == 'album-name':
-                album_info = soup.find('div', class_='mb-12-xxx')
+                album_info = soup.find('div', class_='sm:text-lg')
                 if album_info:
                     album_name = album_info.find('h1').text.strip()
                     return album_name

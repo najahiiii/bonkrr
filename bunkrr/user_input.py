@@ -28,29 +28,21 @@ async def choices(prompt):
         sys.exit(1)
 
 
-def get_user_folder():
+def get_user_folder(default_name=None):
     """
-    Prompts the user to enter an album folder name and returns the path of the folder.
-
-    If the user enters a folder name, it is appended to the current working directory
-    and the default parent folder.
-    If the user leaves the input blank, the default parent folder is appended to
-    the current working directory.
+    Ask user to enter album folder name. If left blank, use default_name or fallback to 'downloads'.
 
     Returns:
-        str: The path of the album folder.
+        str: Path to the folder
     """
-    album_folder_input = input(
-        "[?] Enter album folder name (or leave blank to use default): "
-    ).strip()
+    album = input("[?] Enter album folder name (leave blank for auto): ").strip()
+    cwd = os.getcwd()
 
-    if album_folder_input.strip():
-        album_folder = os.path.join(
-            os.getcwd(),
-            DEFAULT_PARENT_FOLDER,
-            album_folder_input.strip())
+    if album:
+        album_folder = os.path.join(cwd, DEFAULT_PARENT_FOLDER, album)
+    elif default_name:
+        album_folder = os.path.join(cwd, DEFAULT_PARENT_FOLDER, default_name)
     else:
-        album_folder = os.path.join(os.getcwd(), DEFAULT_PARENT_FOLDER)
+        album_folder = os.path.join(cwd, DEFAULT_PARENT_FOLDER)
 
-    print(f"[^] Download folder: {album_folder}")
     return album_folder

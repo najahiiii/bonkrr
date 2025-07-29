@@ -1,6 +1,7 @@
 """This module contains the function to download images from bunkrr albums."""
 import os
 from aiohttp import ClientSession
+from bunkrr.utils import sanitize
 from bunkrr.user_input import get_user_folder, choices
 from bunkrr.data_processing import (
     fetch_data,
@@ -31,7 +32,6 @@ async def downloader():
             urls = urls.split(',')
         urls = [url.strip() for url in urls]
 
-        parent_folder = get_user_folder()
         downloaded_total = 0
         failed_total = 0
         error_messages = []
@@ -42,6 +42,7 @@ async def downloader():
                 album_info = await fetch_data(session, urls[0], 'album-name')
                 if album_info:
                     print(f"\n[*] Downloading file(s) from album: {album_info}")
+                parent_folder = get_user_folder(default_name=sanitize(album_info) or "album")
                 image_data = await fetch_data(session, urls[0], 'image-url')
                 if image_data is not None:
                     folder_path = await create_download_folder(parent_folder)
@@ -60,13 +61,14 @@ async def downloader():
             count = 1
             for url in urls:
                 async with ClientSession() as session:
+                    parent_folder = get_user_folder()
                     album_info = await fetch_data(session, url, 'album-name')
                     if album_info:
                         print(
                             f"\n[*] Downloading file(s) from album: {album_info}")
                     image_data = await fetch_data(session, url, 'image-url')
                     if image_data is not None:
-                        folder_name = str(count)
+                        folder_name = sanitize(album_info or str(count))
                         folder_path = await create_download_folder(parent_folder, folder_name)
                         download_urls = [
                             data.find('img')['src'].replace('/thumbs/', '/').rsplit('.', 1)[0] +
