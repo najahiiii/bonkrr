@@ -47,8 +47,12 @@ async def downloader():
                 if image_data is not None:
                     folder_path = await create_download_folder(parent_folder)
                     download_urls = [
-                        data.find('img')['src'].replace('/thumbs/', '/').rsplit('.', 1)[0] +
-                        os.path.splitext(data.find('p').text.strip())[1] for data in image_data
+                        (
+                            data.find('img')['src'].replace('/thumbs/', '/').rsplit('.', 1)[0]
+                            + os.path.splitext(data.find('p').text.strip())[1],
+                            data.find('p').text.strip()
+                        )
+                        for data in image_data
                     ]
                     downloaded, failed, errors = await download_images_from_urls(
                         download_urls, folder_path
@@ -71,8 +75,12 @@ async def downloader():
                         folder_name = sanitize(album_info or str(count))
                         folder_path = await create_download_folder(parent_folder, folder_name)
                         download_urls = [
-                            data.find('img')['src'].replace('/thumbs/', '/').rsplit('.', 1)[0] +
-                            os.path.splitext(data.find('p').text.strip())[1] for data in image_data
+                            (
+                                data.find('img')['src'].replace('/thumbs/', '/').rsplit('.', 1)[0]
+                                + os.path.splitext(data.find('p').text.strip())[1],
+                                data.find('p').text.strip()
+                            )
+                            for data in image_data
                         ]
                         downloaded, failed, errors = await download_images_from_urls(
                             download_urls, folder_path
