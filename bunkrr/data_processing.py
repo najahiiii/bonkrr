@@ -1,20 +1,24 @@
 """Data processing functions for bunkrr."""
-import os
+
 import asyncio
+import os
+
 from aiohttp import ClientSession, ClientTimeout, client_exceptions
 from bs4 import BeautifulSoup
-from tqdm import tqdm
 from fake_useragent import UserAgent
-from bunkrr.utils import sanitize, filename_from_content_disposition, dedupe_path
+from tqdm import tqdm
 
+from bunkrr.utils import dedupe_path, get_filename
 
 MAX_CONCURRENT_DOWNLOADS = 16
+
 
 def get_random_user_agent():
     """
     Returns a random user agent string.
 
-    :return: A random user agent string.
+    Returns:
+        str: A random user agent string.
     """
     ua = UserAgent()
     return ua.random
@@ -37,15 +41,15 @@ async def fetch_data(session, base_url, data_type):
             response.raise_for_status()
             html = await response.text()
 
-            soup = BeautifulSoup(html, 'html.parser')
-            if data_type == 'album-name':
-                album_info = soup.find('div', class_='sm:text-lg')
+            soup = BeautifulSoup(html, "html.parser")
+            if data_type == "album-name":
+                album_info = soup.find("div", class_="sm:text-lg")
                 if album_info:
-                    album_name = album_info.find('h1').text.strip()
+                    album_name = album_info.find("h1").text.strip()
                     return album_name
                 return None
-            if data_type == 'image-url':
-                data = soup.find_all('div', class_='grid-images_box-txt')
+            if data_type == "image-url":
+                data = soup.find_all("div", class_="grid-images_box-txt")
                 if not data:
                     print("\n[!] Failed to grab file URLs.")
                     return None
@@ -87,59 +91,42 @@ async def create_download_folder(base_path, *args):
 async def download_media(session, url, path, suggested_name=None):
     """
     Downloads media from the given URL and saves it to the specified path.
-    ...
-    """
-    error_message = None
 
+    Args:
+        session (ClientSession): The aiohttp client session.
+        url (str): The media URL.
+        path (str): The local directory path to save the media.
+        suggested_name (Optional[str]): Optional filename suggestion.
+
+    Returns:
+        Tuple[bool, Optional[str]]: (Success flag, error message if any).
+    """
     try:
         headers = {"User-Agent": get_random_user_agent()}
         async with session.get(url, headers=headers) as response:
-            if response.status == 200:
-                # Prefer the human-readable filename passed from the album HTML
-                fallback = os.path.basename(url)
-                ext = os.path.splitext(fallback)[1]
+            if response.status != 200:
+                return False, None
 
-                if suggested_name:
-                    base = sanitize(suggested_name)
-                    if not os.path.splitext(base)[1] and ext:
-                        base = base + ext
-                else:
-                    # fallback to server header (if any), then URL basename
-                    cd = response.headers.get('Content-Disposition') or response.headers.get('content-disposition')
-                    pretty = filename_from_content_disposition(cd)
-                    if pretty:
-                        base = sanitize(pretty)
-                        if not os.path.splitext(base)[1] and ext:
-                            base = base + ext
-                    else:
-                        base = sanitize(fallback)
+            base = get_filename(url, suggested_name, response.headers)
+            file_path = dedupe_path(os.path.join(path, base))
+            file_size = int(response.headers.get("content-length", 0))
 
-                file_path = os.path.join(path, base)
-                file_path = dedupe_path(file_path)
+            with open(file_path, "wb") as file, tqdm(
+                desc=os.path.basename(file_path),
+                total=file_size,
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                leave=False,
+            ) as progress_bar:
+                while chunk := await response.content.read(1024):
+                    file.write(chunk)
+                    progress_bar.update(len(chunk))
 
-                file_size = int(response.headers.get('content-length', 0))
-                with open(file_path, "wb") as file, tqdm(
-                    desc=os.path.basename(file_path),
-                    total=file_size,
-                    unit='B',
-                    unit_scale=True,
-                    unit_divisor=1024,
-                    leave=False
-                ) as progress_bar:
-                    while True:
-                        chunk = await response.content.read(1024)
-                        if not chunk:
-                            break
-                        file.write(chunk)
-                        progress_bar.update(len(chunk))
-                return True, None
-
-            return False, None
+            return True, None
 
     except client_exceptions.ClientError as e:
-        error_message = f"\n[!] Failed to download '{file_path}': {e}"
-
-    return False, error_message
+        return False, f"\n[!] Failed to download '{file_path}': {e}"
 
 
 async def download_images_from_urls(urls, album_folder):
@@ -149,6 +136,16 @@ async def download_images_from_urls(urls, album_folder):
     Accepts either:
       - ["https://.../uuid.mp4", ...]  (old behavior)
       - [("https://.../uuid.mp4", "Pretty Name.mp4"), ...]  (new, preferred)
+
+    Args:
+        urls (List[str or Tuple[str, str]]): List of URLs or (URL, filename) tuples.
+        album_folder (str): Target folder path for downloads.
+
+    Returns:
+        Tuple[List[str], List[str], List[str]]:
+            - List of successfully downloaded URLs.
+            - List of failed URLs.
+            - List of error messages.
     """
     timeout = ClientTimeout(total=None)
     async with ClientSession(timeout=timeout) as session:
@@ -161,18 +158,22 @@ async def download_images_from_urls(urls, album_folder):
             else:
                 url, nice = item, None
             async with semaphore:
-                return await download_media(session, url, album_folder, suggested_name=nice)
+                return await download_media(
+                    session, url, album_folder, suggested_name=nice
+                )
 
         tasks = [download_media_wrapper(item) for item in urls]
         results = await asyncio.gather(*tasks)
 
         downloaded_files = [
             (item[0] if isinstance(item, (list, tuple)) and len(item) >= 1 else item)
-            for item, result in zip(urls, results) if result[0] is True
+            for item, result in zip(urls, results)
+            if result[0] is True
         ]
         failed_files = [
             (item[0] if isinstance(item, (list, tuple)) and len(item) >= 1 else item)
-            for item, result in zip(urls, results) if result[0] is False
+            for item, result in zip(urls, results)
+            if result[0] is False
         ]
         error_messages = [result[1] for result in results if result[1] is not None]
 

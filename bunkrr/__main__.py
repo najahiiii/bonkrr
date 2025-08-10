@@ -1,7 +1,10 @@
 """main module"""
-import sys
+
 import asyncio
+import sys
+
 from bunkrr.downloader import downloader as dl
+
 
 async def main():
     """
@@ -13,6 +16,7 @@ async def main():
     except KeyboardInterrupt:
         print("\n[!] Exiting...")
         sys.exit(0)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
