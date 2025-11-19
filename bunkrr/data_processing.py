@@ -2,6 +2,8 @@
 
 import asyncio
 import os
+import re
+from typing import Iterable, Sequence
 
 from aiohttp import ClientSession, ClientTimeout, client_exceptions
 from bs4 import BeautifulSoup
@@ -20,6 +22,42 @@ try:
 except ValueError:
     LIMIT = 0
 
+# Known CDN subdomains observed in the wild. We keep a preferred host to
+# try first once discovered for the session (seems stable per run/day).
+CDN_CANDIDATES = [
+    "beer",
+    "kebab",
+    "soup",
+    "ramen",
+    "wiener",
+    "rum",
+    "meatballs",
+    "taquito",
+    "cake",
+    "maple",
+    "rice",
+    "nachos",
+    "bacon",
+    "mlk-bk.cdn.gigachad-cdn.ru",
+    "c1.cache8.st",
+    "pizza",
+    "sushi",
+    "pasta",
+    "steak",
+    "fries",
+    "burger",
+    "wine",
+    "vodka",
+    "gin",
+]
+extra = os.environ.get("BUNKR_CDN_EXTRA", "").strip()
+if extra:
+    for name in re.split(r"[\s,;]+", extra):
+        n = name.strip().lower()
+        if n and n not in CDN_CANDIDATES:
+            CDN_CANDIDATES.append(n)
+CDN_PREFERRED: str | None = None  # full hostname if known (e.g., beer.bunkr.ru)
+
 
 def dbg(msg: str) -> None:
     """
@@ -35,7 +73,77 @@ def dbg(msg: str) -> None:
         print(f"[debug] {msg}")
 
 
-def get_random_user_agent():
+def iter_cdn_hosts() -> Iterable[str]:
+    """
+    Iterate possible CDN hostnames, preferring any discovered host first.
+
+    Yields:
+        str: CDN hostname or prefix to try (preferred host first, then unique
+        candidates from CDN_CANDIDATES).
+    """
+    seen: set[str] = set()
+    if CDN_PREFERRED:
+        # Try preferred host first
+        seen.add(CDN_PREFERRED)
+        yield CDN_PREFERRED
+    for h in CDN_CANDIDATES:
+        # Build a canonical host string to avoid duplicates across forms
+        host = h if "." in h else f"{h}.bunkr.ru"
+        if host in seen:
+            continue
+        seen.add(host)
+        yield h
+
+
+# Allow adding CDN hosts from a local file (one name per line)
+CDN_HOSTS_FILE = os.environ.get(
+    "BUNKR_CDN_FILE", os.path.join(os.getcwd(), "cdn_hosts.txt")
+)
+try:
+    if os.path.isfile(CDN_HOSTS_FILE):
+        with open(CDN_HOSTS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                n = line.strip().split("#", 1)[0].strip().lower()
+                if n and n not in CDN_CANDIDATES:
+                    CDN_CANDIDATES.append(n)
+        dbg(f"Loaded extra CDN hosts from {CDN_HOSTS_FILE}")
+except OSError:
+    pass
+
+
+def remember_cdn_host(host_or_prefix: str) -> None:
+    """
+    Persist a discovered CDN host/prefix in memory and on disk for reuse.
+
+    Args:
+        host_or_prefix (str): CDN hostname or prefix observed during requests.
+
+    Returns:
+        None
+    """
+    try:
+        p = host_or_prefix.strip().lower()
+        if not p:
+            return
+        if p not in CDN_CANDIDATES:
+            CDN_CANDIDATES.append(p)
+        # Append to file if not already present
+        if CDN_HOSTS_FILE:
+            try:
+                existing = set()
+                if os.path.isfile(CDN_HOSTS_FILE):
+                    with open(CDN_HOSTS_FILE, "r", encoding="utf-8") as i:
+                        existing = {ln.strip().lower() for ln in i if ln.strip()}
+                if p not in existing:
+                    with open(CDN_HOSTS_FILE, "a", encoding="utf-8") as i:
+                        f.write(p + "\n")
+            except OSError:
+                pass
+    except (AttributeError, OSError):
+        pass
+
+
+def get_random_user_agent() -> str:
     """
     Returns a random user agent string.
 
@@ -46,7 +154,9 @@ def get_random_user_agent():
     return ua.random
 
 
-async def fetch_data(session, base_url, data_type):
+async def fetch_data(
+    session: ClientSession, base_url: str, data_type: str
+) -> str | list | None:
     """
     Fetches either image data or album information from a given URL.
 
@@ -84,7 +194,7 @@ async def fetch_data(session, base_url, data_type):
         return None
 
 
-async def create_download_folder(base_path, *args):
+async def create_download_folder(base_path: str, *args: str) -> str:
     """
     Create a download folder at the specified base path.
 
@@ -110,7 +220,9 @@ async def create_download_folder(base_path, *args):
     return path
 
 
-async def download_media(session, url, path, suggested_name=None):
+async def download_media(
+    session: ClientSession, url: str, path: str, suggested_name: str | None = None
+) -> tuple[bool, str | None]:
     """
     Downloads media from the given URL and saves it to the specified path.
 
@@ -151,13 +263,15 @@ async def download_media(session, url, path, suggested_name=None):
         return False, f"\n[!] Failed to download '{file_path}': {e}"
 
 
-async def download_images_from_urls(urls, album_folder):
+async def download_images_from_urls(
+    urls: Sequence[str | tuple[str, str]], album_folder: str
+) -> tuple[list[str], list[str], list[str]]:
     """
     Downloads images from a list of URLs asynchronously.
 
     Accepts either:
-      - ["https://.../uuid.mp4", ...]  (old behavior)
-      - [("https://.../uuid.mp4", "Pretty Name.mp4"), ...]  (new, preferred)
+        - ["https://.../uuid.mp4", ...]  (old behavior)
+        - [("https://.../uuid.mp4", "Pretty Name.mp4"), ...]  (new, preferred)
 
     Args:
         urls (List[str or Tuple[str, str]]): List of URLs or (URL, filename) tuples.
