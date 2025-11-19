@@ -10,7 +10,29 @@ from tqdm import tqdm
 
 from bunkrr.utils import dedupe_path, get_filename
 
-MAX_CONCURRENT_DOWNLOADS = 16
+MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("BUNKR_CONCURRENCY", "12") or 12)
+
+# Debug flag controlled by env var BUNKR_DEBUG
+DEBUG = os.environ.get("BUNKR_DEBUG", "").lower() in {"1", "true", "yes", "on"}
+LIMIT = 0
+try:
+    LIMIT = int(os.environ.get("BUNKR_LIMIT", "0") or 0)
+except ValueError:
+    LIMIT = 0
+
+
+def dbg(msg: str) -> None:
+    """
+    Print a debug message when the DEBUG flag is enabled.
+
+    Args:
+        msg (str): Message to print when debug logging is active.
+
+    Returns:
+        None
+    """
+    if DEBUG:
+        print(f"[debug] {msg}")
 
 
 def get_random_user_agent():
