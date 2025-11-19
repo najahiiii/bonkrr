@@ -181,11 +181,109 @@ async def fetch_data(
                     return album_name
                 return None
             if data_type == "image-url":
-                data = soup.find_all("div", class_="grid-images_box-txt")
-                if not data:
+                def extract_blocks(markup: str):
+                    s = BeautifulSoup(markup, "html.parser")
+                    out = []
+                    out.extend(s.find_all("div", class_="grid-images_box-txt"))
+                    out.extend(s.find_all("div", class_="grid-videos_box-txt"))
+                    return s, out
+
+                def block_item_id(block) -> str | None:
+                    # Prefer the thumbnail anchor next to the text box
+                    a = block.find_previous_sibling("a", href=True)
+                    if not a and block.parent:
+                        a = block.parent.find("a", href=True)
+                    href = a.get("href") if a else None
+                    if not href:
+                        return None
+                    m = re.search(r"/(f|i|v)/([A-Za-z0-9]+)", href)
+                    if not m:
+                        return None
+                    return f"{m.group(1)}/{m.group(2)}"
+
+                soup1, blocks1 = extract_blocks(html)
+                seen_ids: set[str] = set()
+                unique_blocks: list = []
+                for b in blocks1:
+                    bid = block_item_id(b)
+                    if bid and bid not in seen_ids:
+                        seen_ids.add(bid)
+                        unique_blocks.append(b)
+                dbg(f"Album page 1: found {len(unique_blocks)} unique items (raw {len(blocks1)})")
+                blocks = unique_blocks
+
+                # Strategy 1: detect pagination count from links
+                page_nums: list[int] = []
+                for a in soup.find_all("a", href=True):
+                    m = re.search(r"[?&]page=(\\d+)", a["href"])
+                    if m:
+                        try:
+                            page_nums.append(int(m.group(1)))
+                        except ValueError:
+                            pass
+
+                fetched_pages = {1}
+
+                if page_nums:
+                    max_page = max(page_nums)
+                    def with_page(u: str, n: int) -> str:
+                        parts = urlsplit(u)
+                        q = dict(parse_qsl(parts.query))
+                        q["page"] = str(n)
+                        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(q), parts.fragment))
+                    for pnum in range(2, max_page + 1):
+                        page_url = with_page(base_url, pnum)
+                        try:
+                            async with session.get(page_url) as r2:
+                                r2.raise_for_status()
+                                html2 = await r2.text()
+                                _, raw_blocks = extract_blocks(html2)
+                                added = 0
+                                for b in raw_blocks:
+                                    bid = block_item_id(b)
+                                    if bid and bid not in seen_ids:
+                                        seen_ids.add(bid)
+                                        blocks.append(b)
+                                        added += 1
+                                fetched_pages.add(pnum)
+                                dbg(f"Album page {pnum}: added {added} new items (raw {len(raw_blocks)})")
+                        except Exception:
+                            continue
+
+                # Strategy 2 (fallback): probe subsequent pages until empty
+                if fetched_pages == {1}:
+                    def with_page(u: str, n: int) -> str:
+                        parts = urlsplit(u)
+                        q = dict(parse_qsl(parts.query))
+                        q["page"] = str(n)
+                        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(q), parts.fragment))
+
+                    for pnum in range(2, 201):  # practical upper bound
+                        page_url = with_page(base_url, pnum)
+                        try:
+                            async with session.get(page_url) as r2:
+                                if r2.status >= 400:
+                                    break
+                                html2 = await r2.text()
+                                _, raw_blocks = extract_blocks(html2)
+                                added = 0
+                                for b in raw_blocks:
+                                    bid = block_item_id(b)
+                                    if bid and bid not in seen_ids:
+                                        seen_ids.add(bid)
+                                        blocks.append(b)
+                                        added += 1
+                                fetched_pages.add(pnum)
+                                dbg(f"Album page {pnum}: added {added} new items (probe raw {len(raw_blocks)})")
+                                if added == 0:
+                                    break
+                        except Exception:
+                            break
+
+                if not blocks:
                     print("\n[!] Failed to grab file URLs.")
                     return None
-                return data
+                return blocks
     except client_exceptions.InvalidURL as e:
         print(f"\n[!] Invalid URL: {e}")
         return None
