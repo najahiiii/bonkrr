@@ -1,7 +1,9 @@
 """This module contains the function to download images from bunkrr albums."""
 
 import os
+import re
 from typing import List, Optional, Tuple
+from urllib.parse import urljoin
 
 from aiohttp import ClientSession
 
@@ -35,7 +37,7 @@ async def fetch_album_data(
     return album_name, image_data
 
 
-def build_download_urls(image_data: list) -> List[Tuple[str, str]]:
+def build_download_urls(image_data: list, base_url: str) -> List[Tuple[str, str]]:
     """
     Build a list of tuples containing full image URLs and suggested filenames.
 
@@ -47,14 +49,50 @@ def build_download_urls(image_data: list) -> List[Tuple[str, str]]:
             - url (str): The full URL to the image.
             - suggested_name (str): The suggested filename for saving the image.
     """
-    return [
-        (
-            data.find("img")["src"].replace("/thumbs/", "/").rsplit(".", 1)[0]
-            + os.path.splitext(data.find("p").text.strip())[1],
-            data.find("p").text.strip(),
-        )
-        for data in image_data
-    ]
+    urls: List[Tuple[str, str]] = []
+    seen: set[str] = set()
+    for data in image_data:
+        # Prefer the closest ancestor anchor; avoids picking pagination links
+        href = None
+        # Most layouts: the text box <div> sits next to an <a> (thumbnail link)
+        a_sibling = data.find_previous_sibling("a", href=True)
+        if a_sibling and a_sibling.get("href"):
+            href = a_sibling.get("href")
+        elif data.parent:
+            # fallback: an <a> inside the same parent card
+            a_in_parent = data.parent.find("a", href=True)
+            if a_in_parent and a_in_parent.get("href"):
+                href = a_in_parent.get("href")
+
+        title_tag = data.find("p")
+        nice = title_tag.text.strip() if title_tag else ""
+
+        if href:
+            # Normalize to absolute
+            if href.startswith("?"):
+                href = None
+            else:
+                href = urljoin(base_url, href)
+
+        # Only keep item pages like /f/<id>, /i/<id>, /v/<id>
+        if href and not re.search(r"/(f|i|v)/[A-Za-z0-9]+", href):
+            href = None
+
+        if href:
+            if href not in seen:
+                seen.add(href)
+                urls.append((href, nice))
+            continue
+
+        # Fallback to old heuristic using thumbnail src if anchor not found
+        # Avoid using thumbnail URLs as they are not the actual files
+        # If no anchor was found, skip this entry to prevent noise
+        continue
+
+        # If all else fails, skip this entry
+        continue
+
+    return urls
 
 
 async def download_album(
@@ -84,8 +122,14 @@ async def download_album(
         return 0, 0, []
 
     folder = folder_name or sanitize(album_name or "album")
-    folder_path = await create_download_folder(parent_folder, folder)
-    download_urls = build_download_urls(image_data)
+    # Avoid double-nesting when parent_folder already ends with the album folder
+    parent_tail = os.path.basename(os.path.normpath(parent_folder))
+    if parent_tail == folder:
+        folder_path = await create_download_folder(parent_folder)
+    else:
+        folder_path = await create_download_folder(parent_folder, folder)
+    download_urls = build_download_urls(image_data, url)
+    print(f"[*] Found {len(download_urls)} file(s). Starting downloads...")
 
     return await download_images_from_urls(download_urls, folder_path)
 
