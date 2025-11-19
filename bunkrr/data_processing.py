@@ -682,7 +682,39 @@ async def download_images_from_urls(
             - List of failed URLs.
             - List of error messages.
     """
-    timeout = ClientTimeout(total=None)
+    # Finite timeouts to avoid hanging forever (no overall cap, but idle/read capped)
+    timeout = ClientTimeout(total=None, connect=30, sock_connect=30, sock_read=300)
+
+    def exists_with_dedupe(folder: str, base: str) -> bool:
+        path = os.path.join(folder, base)
+        if os.path.exists(path):
+            return True
+        root, ext = os.path.splitext(base)
+        try:
+            names = os.listdir(folder)
+        except FileNotFoundError:
+            return False
+        pattern = re.compile(re.escape(root) + r" \(\d+\)" + re.escape(ext) + r"$")
+        return any((n == base or pattern.match(n)) for n in names)
+
+    filtered = []
+    skipped = []
+    for item in urls:
+        if isinstance(item, (list, tuple)) and len(item) >= 2 and item[1]:
+            u, nice = item[0], item[1]
+            try:
+                expected = get_filename(str(u), str(nice), {})
+            except Exception:
+                expected = None
+            if expected and exists_with_dedupe(album_folder, expected):
+                skipped.append(item)
+                dbg(f"Skipping existing file: {expected}")
+                continue
+        filtered.append(item)
+
+    if skipped:
+        dbg(f"Skipping {len(skipped)} existing file(s)")
+
     async with ClientSession(timeout=timeout) as session:
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
@@ -697,19 +729,29 @@ async def download_images_from_urls(
                     session, url, album_folder, suggested_name=nice
                 )
 
-        tasks = [download_media_wrapper(item) for item in urls]
-        results = await asyncio.gather(*tasks)
+        active_urls = filtered
+        if LIMIT > 0 and len(active_urls) > LIMIT:
+            dbg(f"Limiting downloads to first {LIMIT} items out of {len(active_urls)} (skipped {len(skipped)})")
+            active_urls = active_urls[:LIMIT]
+        tasks = [download_media_wrapper(item) for item in active_urls]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        downloaded_files = [
-            (item[0] if isinstance(item, (list, tuple)) and len(item) >= 1 else item)
-            for item, result in zip(urls, results)
-            if result[0] is True
-        ]
-        failed_files = [
-            (item[0] if isinstance(item, (list, tuple)) and len(item) >= 1 else item)
-            for item, result in zip(urls, results)
-            if result[0] is False
-        ]
-        error_messages = [result[1] for result in results if result[1] is not None]
+        downloaded_files = []
+        failed_files = []
+        error_messages = []
+
+        for item, result in zip(active_urls, results):
+            url = item[0] if isinstance(item, (list, tuple)) and len(item) >= 1 else item
+            if isinstance(result, Exception):
+                failed_files.append(url)
+                error_messages.append(f"\n[!] Error downloading '{url}': {result}")
+                continue
+            ok, err = result
+            if ok:
+                downloaded_files.append(url)
+            else:
+                failed_files.append(url)
+                if err:
+                    error_messages.append(err)
 
         return downloaded_files, failed_files, error_messages
