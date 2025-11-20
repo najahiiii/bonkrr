@@ -1,13 +1,13 @@
 """Data processing functions for bunkrr."""
 
-# pylint: disable=import-error,line-too-long,too-many-branches,too-many-statements,too-many-locals,too-many-return-statements,too-many-nested-blocks,broad-exception-caught,global-statement,cell-var-from-loop
+# pylint: disable=broad-exception-caught,line-too-long
 
 import asyncio
 import os
 import re
 from typing import Mapping, Sequence
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 from aiohttp import ClientResponse, ClientSession, ClientTimeout, client_exceptions
 from bs4 import BeautifulSoup
 from tqdm import tqdm

@@ -2,12 +2,13 @@
 
 # pylint: disable=broad-exception-caught
 
-import base64
 import asyncio
+import base64
 from typing import Optional
 from urllib.parse import quote
 
 from aiohttp import ClientSession, ClientTimeout, client_exceptions
+
 from bunkrr.utils import get_random_user_agent
 
 API_URL = "https://apidl.bunkr.ru/api/_001_v2"
