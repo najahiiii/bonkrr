@@ -1,5 +1,7 @@
 """API helper to resolve bunkr file ids into final media URLs."""
 
+# pylint: disable=broad-exception-caught
+
 import base64
 import asyncio
 from typing import Optional
@@ -51,7 +53,7 @@ async def resolve_bunkr_url(
     headers = {
         "Content-Type": "application/json",
         "User-Agent": get_random_user_agent(),
-        "Referer": "https://bunkr.ac/",
+        "Referer": f"https://get.bunkrr.su/file/{file_id}",
     }
 
     async def _call_with_retry(sess: ClientSession) -> dict:

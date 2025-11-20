@@ -1,5 +1,7 @@
 """This modules contains common utils"""
 
+# pylint: disable=broad-exception-caught
+
 import os
 import re
 import sys
@@ -19,6 +21,7 @@ def get_random_user_agent() -> str:
         return UserAgent().random
     except Exception:
         return "Mozilla/5.0"
+
 
 async def create_download_folder(base_path: str, *args: str) -> str:
     """
