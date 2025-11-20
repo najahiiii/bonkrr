@@ -85,9 +85,6 @@ def build_download_urls(image_data: list, base_url: str) -> List[Tuple[str, str]
         # If no anchor was found, skip this entry to prevent noise
         continue
 
-        # If all else fails, skip this entry
-        continue
-
     return urls
 
 

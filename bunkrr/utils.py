@@ -6,7 +6,19 @@ import sys
 import urllib.parse
 from typing import Mapping, Optional
 
+from fake_useragent import UserAgent
+
 DEFAULT_PARENT_FOLDER = "downloads"
+
+
+def get_random_user_agent() -> str:
+    """
+    Return a random user agent string; fallback to a generic UA if generator fails.
+    """
+    try:
+        return UserAgent().random
+    except Exception:
+        return "Mozilla/5.0"
 
 async def create_download_folder(base_path: str, *args: str) -> str:
     """
