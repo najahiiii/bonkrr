@@ -8,6 +8,30 @@ from typing import Mapping, Optional
 
 DEFAULT_PARENT_FOLDER = "downloads"
 
+async def create_download_folder(base_path: str, *args: str) -> str:
+    """
+    Create a download folder at the specified base path (async-friendly wrapper).
+
+    Args:
+        base_path (str): Base path where the folder should be created.
+        *args (str): Optional subfolder components to nest under base_path.
+
+    Returns:
+        str: The path to the created (or existing) folder.
+    """
+    if len(args) == 1:
+        folder_name = args[0]
+        path = os.path.join(base_path, folder_name)
+        if not os.path.exists(path):
+            os.makedirs(path)
+    else:
+        folder_name = os.path.join(base_path, *args) if args else base_path
+        if not os.path.exists(folder_name):
+            os.makedirs(folder_name)
+        path = folder_name
+
+    return path
+
 
 def choices(prompt: str) -> Optional[None]:
     """

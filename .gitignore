@@ -161,3 +161,6 @@ cython_debug/
 
 # download folders
 downloads/*
+
+# CDN Hosts
+cdn_hosts.txt

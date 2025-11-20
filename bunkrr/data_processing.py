@@ -1,12 +1,14 @@
 """Data processing functions for bunkrr."""
 
+# pylint: disable=import-error,line-too-long,too-many-branches,too-many-statements,too-many-locals,too-many-return-statements,too-many-nested-blocks,broad-exception-caught,global-statement,cell-var-from-loop
+
 import asyncio
 import os
 import re
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode, quote
-from aiohttp import ClientSession, ClientTimeout, client_exceptions
+from aiohttp import ClientResponse, ClientSession, ClientTimeout, client_exceptions
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
 from tqdm import tqdm
@@ -58,6 +60,7 @@ if extra:
         if n and n not in CDN_CANDIDATES:
             CDN_CANDIDATES.append(n)
 CDN_PREFERRED: str | None = None  # full hostname if known (e.g., beer.bunkr.ru)
+MEDIA_EXTS = (".mp4", ".m4v", ".mkv", ".mov", ".webm", ".jpg", ".jpeg", ".png", ".gif")
 
 
 def dbg(msg: str) -> None:
@@ -133,11 +136,11 @@ def remember_cdn_host(host_or_prefix: str) -> None:
             try:
                 existing = set()
                 if os.path.isfile(CDN_HOSTS_FILE):
-                    with open(CDN_HOSTS_FILE, "r", encoding="utf-8") as i:
-                        existing = {ln.strip().lower() for ln in i if ln.strip()}
+                    with open(CDN_HOSTS_FILE, "r", encoding="utf-8") as fh:
+                        existing = {ln.strip().lower() for ln in fh if ln.strip()}
                 if p not in existing:
-                    with open(CDN_HOSTS_FILE, "a", encoding="utf-8") as i:
-                        f.write(p + "\n")
+                    with open(CDN_HOSTS_FILE, "a", encoding="utf-8") as fh:
+                        fh.write(p + "\n")
             except OSError:
                 pass
     except (AttributeError, OSError):
@@ -153,6 +156,37 @@ def get_random_user_agent() -> str:
     """
     ua = UserAgent()
     return ua.random
+
+
+def _media_save_path(
+    target_dir: str,
+    response_url: str,
+    suggested_name: str | None,
+    headers: Mapping[str, str],
+) -> tuple[str, int]:
+    """Compute a unique destination path and reported size for a response."""
+    base = get_filename(response_url, suggested_name, headers)
+    file_path = dedupe_path(os.path.join(target_dir, base))
+    file_size = int(headers.get("content-length", 0))
+    return file_path, file_size
+
+
+async def _stream_response_to_file(
+    response: ClientResponse, file_path: str, file_size: int
+) -> None:
+    """Stream response content to disk with a progress bar."""
+    dbg(f"Saving to '{file_path}' size={file_size if file_size else 'unknown'}")
+    with open(file_path, "wb") as file, tqdm(
+        desc=os.path.basename(file_path),
+        total=file_size,
+        unit="B",
+        unit_scale=True,
+        unit_divisor=1024,
+        leave=False,
+    ) as progress_bar:
+        while chunk := await response.content.read(1024):
+            file.write(chunk)
+            progress_bar.update(len(chunk))
 
 
 async def fetch_data(
@@ -182,7 +216,8 @@ async def fetch_data(
                     return album_name
                 return None
             if data_type == "image-url":
-                def extract_blocks(markup: str):
+
+                def extract_blocks(markup: str) -> tuple[BeautifulSoup, list]:
                     s = BeautifulSoup(markup, "html.parser")
                     out = []
                     out.extend(s.find_all("div", class_="grid-images_box-txt"))
@@ -202,7 +237,7 @@ async def fetch_data(
                         return None
                     return f"{m.group(1)}/{m.group(2)}"
 
-                soup1, blocks1 = extract_blocks(html)
+                _, blocks1 = extract_blocks(html)
                 seen_ids: set[str] = set()
                 unique_blocks: list = []
                 for b in blocks1:
@@ -210,7 +245,9 @@ async def fetch_data(
                     if bid and bid not in seen_ids:
                         seen_ids.add(bid)
                         unique_blocks.append(b)
-                dbg(f"Album page 1: found {len(unique_blocks)} unique items (raw {len(blocks1)})")
+                dbg(
+                    f"Album page 1: found {len(unique_blocks)} unique items (raw {len(blocks1)})"
+                )
                 blocks = unique_blocks
 
                 # Strategy 1: detect pagination count from links
@@ -225,13 +262,22 @@ async def fetch_data(
 
                 fetched_pages = {1}
 
+                def with_page(u: str, page_num: int) -> str:
+                    parts = urlsplit(u)
+                    q = dict(parse_qsl(parts.query))
+                    q["page"] = str(page_num)
+                    return urlunsplit(
+                        (
+                            parts.scheme,
+                            parts.netloc,
+                            parts.path,
+                            urlencode(q),
+                            parts.fragment,
+                        )
+                    )
+
                 if page_nums:
                     max_page = max(page_nums)
-                    def with_page(u: str, n: int) -> str:
-                        parts = urlsplit(u)
-                        q = dict(parse_qsl(parts.query))
-                        q["page"] = str(n)
-                        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(q), parts.fragment))
                     for pnum in range(2, max_page + 1):
                         page_url = with_page(base_url, pnum)
                         try:
@@ -247,18 +293,14 @@ async def fetch_data(
                                         blocks.append(b)
                                         added += 1
                                 fetched_pages.add(pnum)
-                                dbg(f"Album page {pnum}: added {added} new items (raw {len(raw_blocks)})")
+                                dbg(
+                                    f"Album page {pnum}: added {added} new items (raw {len(raw_blocks)})"
+                                )
                         except Exception:
                             continue
 
                 # Strategy 2 (fallback): probe subsequent pages until empty
                 if fetched_pages == {1}:
-                    def with_page(u: str, n: int) -> str:
-                        parts = urlsplit(u)
-                        q = dict(parse_qsl(parts.query))
-                        q["page"] = str(n)
-                        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(q), parts.fragment))
-
                     for pnum in range(2, 201):  # practical upper bound
                         page_url = with_page(base_url, pnum)
                         try:
@@ -275,7 +317,9 @@ async def fetch_data(
                                         blocks.append(b)
                                         added += 1
                                 fetched_pages.add(pnum)
-                                dbg(f"Album page {pnum}: added {added} new items (probe raw {len(raw_blocks)})")
+                                dbg(
+                                    f"Album page {pnum}: added {added} new items (probe raw {len(raw_blocks)})"
+                                )
                                 if added == 0:
                                     break
                         except Exception:
@@ -291,32 +335,6 @@ async def fetch_data(
     except client_exceptions.ClientError as ce:
         print(f"\n[!] Client error: {ce}")
         return None
-
-
-async def create_download_folder(base_path: str, *args: str) -> str:
-    """
-    Create a download folder at the specified base path.
-
-    Args:
-        base_path (str): The base path where the download folder should be created.
-        *args: Variable number of arguments representing the folder name or subdirectories.
-
-    Returns:
-        str: The path of the created download folder.
-
-    """
-    if len(args) == 1:
-        folder_name = args[0]
-        path = os.path.join(base_path, folder_name)
-        if not os.path.exists(path):
-            os.makedirs(path)
-    else:
-        folder_name = os.path.join(base_path, *args)
-        if not os.path.exists(folder_name):
-            os.makedirs(folder_name)
-        path = folder_name
-
-    return path
 
 
 async def download_media(
@@ -360,38 +378,34 @@ async def download_media(
         current_url = prefer_direct_endpoint(url)
         if current_url != url:
             headers["Referer"] = url
-        dbg(f"Start download: suggested='{suggested_name}', url='{url}', try='{current_url}'")
+        dbg(
+            f"Start download: suggested='{suggested_name}', url='{url}', try='{current_url}'"
+        )
         visited: set[str] = set()
         for _ in range(8):
             if current_url in visited:
                 dbg(f"Loop detected at {current_url}")
-                return False, f"\n[!] Could not resolve download URL from {current_url} (loop)"
+                return (
+                    False,
+                    f"\n[!] Could not resolve download URL from {current_url} (loop)",
+                )
             visited.add(current_url)
-            async with session.get(current_url, headers=headers, allow_redirects=True) as response:
-                dbg(f"GET {current_url} -> {response.status} {response.headers.get('Content-Type','')}")
+            async with session.get(
+                current_url, headers=headers, allow_redirects=True
+            ) as response:
+                dbg(
+                    f"GET {current_url} -> {response.status} {response.headers.get('Content-Type','')}"
+                )
                 if response.status not in (200, 206):
                     return False, f"\n[!] HTTP {response.status} at {current_url}"
 
                 ctype = response.headers.get("Content-Type", "")
                 if "text/html" not in ctype.lower():
                     # We have the media stream
-                    base = get_filename(current_url, suggested_name, response.headers)
-                    file_path = dedupe_path(os.path.join(path, base))
-                    file_size = int(response.headers.get("content-length", 0))
-                    dbg(f"Saving to '{file_path}' size={file_size if file_size else 'unknown'}")
-
-                    with open(file_path, "wb") as file, tqdm(
-                        desc=os.path.basename(file_path),
-                        total=file_size,
-                        unit="B",
-                        unit_scale=True,
-                        unit_divisor=1024,
-                        leave=False,
-                    ) as progress_bar:
-                        while chunk := await response.content.read(1024):
-                            file.write(chunk)
-                            progress_bar.update(len(chunk))
-
+                    file_path, file_size = _media_save_path(
+                        path, current_url, suggested_name, response.headers
+                    )
+                    await _stream_response_to_file(response, file_path, file_size)
                     return True, None
 
                 # Parse HTML to find the next hop
@@ -400,13 +414,17 @@ async def download_media(
 
                 next_url = None
                 # 1) Explicit download link
-                dl = soup.find("a", id="download") or soup.find("a", attrs={"download": True})
+                dl = soup.find("a", id="download") or soup.find(
+                    "a", attrs={"download": True}
+                )
                 if dl and dl.get("href"):
                     next_url = dl.get("href")
 
                 # 2) Bunkr file page or direct file link
                 if not next_url:
-                    a = soup.find("a", href=lambda h: h and ("/d/" in h or "/file/" in h))
+                    a = soup.find(
+                        "a", href=lambda h: h and ("/d/" in h or "/file/" in h)
+                    )
                     if a and a.get("href"):
                         next_url = a.get("href")
 
@@ -420,8 +438,12 @@ async def download_media(
 
                 # 3) Any anchor to bunkr CDN with common media ext
                 if not next_url:
-                    exts = (".mp4", ".m4v", ".mkv", ".mov", ".webm", ".jpg", ".jpeg", ".png", ".gif")
-                    a = soup.find("a", href=lambda h: h and h.startswith("http") and any(ext in h.lower() for ext in exts))
+                    a = soup.find(
+                        "a",
+                        href=lambda href: href
+                        and href.startswith("http")
+                        and any(ext in href.lower() for ext in MEDIA_EXTS),
+                    )
                     if a and a.get("href"):
                         next_url = a.get("href")
 
@@ -439,7 +461,9 @@ async def download_media(
 
                 # 6) meta refresh redirects
                 if not next_url:
-                    meta = soup.find("meta", attrs={"http-equiv": re.compile("refresh", re.I)})
+                    meta = soup.find(
+                        "meta", attrs={"http-equiv": re.compile("refresh", re.I)}
+                    )
                     if meta and meta.get("content"):
                         m = re.search(r"url=(.+)", meta.get("content"), flags=re.I)
                         if m:
@@ -454,19 +478,22 @@ async def download_media(
                 if not next_url:
                     for script in soup.find_all("script"):
                         text = script.string or ""
-                        for m in re.findall(r"https?://[^\s'\"]+", text):
-                            if any(ext in m.lower() for ext in (".mp4", ".m4v", ".mkv", ".mov", ".webm", ".jpg", ".jpeg", ".png", ".gif")):
-                                next_url = m
+                        for match in re.findall(r"https?://[^\\s'\\\"]+", text):
+                            if any(ext in match.lower() for ext in MEDIA_EXTS):
+                                next_url = match
                                 break
                         if next_url:
                             break
 
                 # 9) Any element with a data-* URL pointing to a media file
                 if not next_url:
-                    media_exts = (".mp4", ".m4v", ".mkv", ".mov", ".webm", ".jpg", ".jpeg", ".png", ".gif")
                     for tag in soup.find_all(True):
-                        for attr, val in tag.attrs.items():
-                            if isinstance(val, str) and val.startswith("http") and any(ext in val.lower() for ext in media_exts):
+                        for _, val in tag.attrs.items():
+                            if (
+                                isinstance(val, str)
+                                and val.startswith("http")
+                                and any(ext in val.lower() for ext in MEDIA_EXTS)
+                            ):
                                 next_url = val
                                 break
                         if next_url:
@@ -474,14 +501,23 @@ async def download_media(
 
                 # 10) <link rel="preload"/"prefetch"> pointing to media
                 if not next_url:
-                    link = soup.find("link", rel=lambda r: r and any(k in r for k in ("preload", "prefetch")), href=True)
-                    if link and any(ext in link["href"].lower() for ext in (".mp4", ".m4v", ".mkv", ".mov", ".webm", ".jpg", ".jpeg", ".png", ".gif")):
+                    link = soup.find(
+                        "link",
+                        rel=lambda rel: rel
+                        and any(k in rel for k in ("preload", "prefetch")),
+                        href=True,
+                    )
+                    if link and any(ext in link["href"].lower() for ext in MEDIA_EXTS):
                         next_url = link["href"]
 
                 # 11) Grep entire HTML for bunkr CDN media URLs
                 if not next_url:
                     # Accept any bunkr-like CDN host and common media file extensions
-                    m = re.search(r"https?://[A-Za-z0-9.-]*bunkr\.(?:ru|ws|su|ac)/[^\s'\"]+\.(?:mp4|m4v|mkv|mov|webm|jpg|jpeg|png|gif)[^\s'\"]*", html, flags=re.I)
+                    m = re.search(
+                        r"https?://[A-Za-z0-9.-]*bunkr\.(?:ru|ws|su|ac)/[^\s'\"]+\.(?:mp4|m4v|mkv|mov|webm|jpg|jpeg|png|gif)[^\s'\"]*",
+                        html,
+                        flags=re.I,
+                    )
                     if m:
                         next_url = m.group(0)
 
@@ -495,39 +531,50 @@ async def download_media(
                             for sub in iter_cdn_hosts():
                                 # sub may be a prefix (e.g., 'beer') or a full host (e.g., 'c1.cache8.st')
                                 host = sub if "." in sub else f"{sub}.bunkr.ru"
-                                q = f"?n={quote(str(suggested_name))}" if suggested_name else ""
+                                q = (
+                                    f"?n={quote(str(suggested_name))}"
+                                    if suggested_name
+                                    else ""
+                                )
                                 trial = f"https://{host}/{file_path_hint}{q}"
                                 try:
                                     dbg(f"Trying CDN candidate {trial}")
-                                    async with session.get(trial, headers=headers, allow_redirects=True) as rcdn:
-                                        dbg(f"GET {trial} -> {rcdn.status} {rcdn.headers.get('Content-Type','')}")
-                                        ctyp = (rcdn.headers.get("Content-Type", "").lower())
-                                        if rcdn.status in (200, 206) and ("text/html" not in ctyp):
+                                    async with session.get(
+                                        trial, headers=headers, allow_redirects=True
+                                    ) as rcdn:
+                                        dbg(
+                                            f"GET {trial} -> {rcdn.status} {rcdn.headers.get('Content-Type','')}"
+                                        )
+                                        ctyp = rcdn.headers.get(
+                                            "Content-Type", ""
+                                        ).lower()
+                                        if rcdn.status in (200, 206) and (
+                                            "text/html" not in ctyp
+                                        ):
                                             # Remember working host for subsequent items
                                             try:
-                                                host = urlsplit(str(rcdn.url)).hostname or ""
+                                                host = (
+                                                    urlsplit(str(rcdn.url)).hostname
+                                                    or ""
+                                                )
                                                 if host:
                                                     CDN_PREFERRED = host
-                                                    dbg(f"CDN preferred set to {CDN_PREFERRED}")
+                                                    dbg(
+                                                        f"CDN preferred set to {CDN_PREFERRED}"
+                                                    )
                                                     remember_cdn_host(CDN_PREFERRED)
                                             except Exception:
                                                 pass
                                             # Stream this content immediately
-                                            base = get_filename(str(rcdn.url), suggested_name, rcdn.headers)
-                                            file_path = dedupe_path(os.path.join(path, base))
-                                            file_size = int(rcdn.headers.get("content-length", 0))
-                                            dbg(f"Saving to '{file_path}' size={file_size if file_size else 'unknown'}")
-                                            with open(file_path, "wb") as file, tqdm(
-                                                desc=os.path.basename(file_path),
-                                                total=file_size,
-                                                unit="B",
-                                                unit_scale=True,
-                                                unit_divisor=1024,
-                                                leave=False,
-                                            ) as progress_bar:
-                                                while chunk := await rcdn.content.read(1024):
-                                                    file.write(chunk)
-                                                    progress_bar.update(len(chunk))
+                                            file_path, file_size = _media_save_path(
+                                                path,
+                                                str(rcdn.url),
+                                                suggested_name,
+                                                rcdn.headers,
+                                            )
+                                            await _stream_response_to_file(
+                                                rcdn, file_path, file_size
+                                            )
                                             return True, None
                                 except Exception:
                                     continue
@@ -540,7 +587,9 @@ async def download_media(
                         same_page = True
                 if not next_url or same_page:
                     parts = urlsplit(current_url)
-                    if re.search(r"get\\.bunkrr\\.", parts.netloc) and re.match(r"^/file/\\d+$", parts.path):
+                    if re.search(r"get\\.bunkrr\\.", parts.netloc) and re.match(
+                        r"^/file/\\d+$", parts.path
+                    ):
                         # 12b) Try CDN candidates from <script data-v> even if we already had a self-link
                         try:
                             script_with_v = soup.find("script", attrs={"data-v": True})
@@ -549,37 +598,80 @@ async def download_media(
                                 if file_path_hint:
                                     for sub in iter_cdn_hosts():
                                         host = sub if "." in sub else f"{sub}.bunkr.ru"
-                                        q = f"?n={quote(str(suggested_name))}" if suggested_name else ""
+                                        q = (
+                                            f"?n={quote(str(suggested_name))}"
+                                            if suggested_name
+                                            else ""
+                                        )
                                         trial = f"https://{host}/{file_path_hint}{q}"
                                         try:
                                             dbg(f"Trying CDN candidate {trial}")
-                                            async with session.get(trial, headers=headers, allow_redirects=True) as rcdn:
-                                                dbg(f"GET {trial} -> {rcdn.status} {rcdn.headers.get('Content-Type','')}")
-                                                ctyp = (rcdn.headers.get("Content-Type", "").lower())
-                                                if rcdn.status in (200, 206) and ("text/html" not in ctyp):
+                                            async with session.get(
+                                                trial,
+                                                headers=headers,
+                                                allow_redirects=True,
+                                            ) as rcdn:
+                                                dbg(
+                                                    f"GET {trial} -> {rcdn.status} {rcdn.headers.get('Content-Type','')}"
+                                                )
+                                                ctyp = rcdn.headers.get(
+                                                    "Content-Type", ""
+                                                ).lower()
+                                                if rcdn.status in (200, 206) and (
+                                                    "text/html" not in ctyp
+                                                ):
                                                     try:
-                                                        host = urlsplit(str(rcdn.url)).hostname or ""
+                                                        host = (
+                                                            urlsplit(
+                                                                str(rcdn.url)
+                                                            ).hostname
+                                                            or ""
+                                                        )
                                                         if host:
                                                             CDN_PREFERRED = host
-                                                            dbg(f"CDN preferred set to {CDN_PREFERRED}")
-                                                            remember_cdn_host(CDN_PREFERRED)
+                                                            dbg(
+                                                                f"CDN preferred set to {CDN_PREFERRED}"
+                                                            )
+                                                            remember_cdn_host(
+                                                                CDN_PREFERRED
+                                                            )
                                                     except Exception:
                                                         pass
-                                                    base = get_filename(str(rcdn.url), suggested_name, rcdn.headers)
-                                                    file_path = dedupe_path(os.path.join(path, base))
-                                                    file_size = int(rcdn.headers.get("content-length", 0))
-                                                    dbg(f"Saving to '{file_path}' size={file_size if file_size else 'unknown'}")
-                                                    with open(file_path, "wb") as file, tqdm(
-                                                        desc=os.path.basename(file_path),
+                                                    base = get_filename(
+                                                        str(rcdn.url),
+                                                        suggested_name,
+                                                        rcdn.headers,
+                                                    )
+                                                    file_path = dedupe_path(
+                                                        os.path.join(path, base)
+                                                    )
+                                                    file_size = int(
+                                                        rcdn.headers.get(
+                                                            "content-length", 0
+                                                        )
+                                                    )
+                                                    dbg(
+                                                        f"Saving to '{file_path}' size={file_size if file_size else 'unknown'}"
+                                                    )
+                                                    with open(
+                                                        file_path, "wb"
+                                                    ) as file, tqdm(
+                                                        desc=os.path.basename(
+                                                            file_path
+                                                        ),
                                                         total=file_size,
                                                         unit="B",
                                                         unit_scale=True,
                                                         unit_divisor=1024,
                                                         leave=False,
                                                     ) as progress_bar:
-                                                        while chunk := await rcdn.content.read(1024):
+                                                        while chunk := await rcdn.content.read(
+                                                            1024
+                                                        ):
                                                             file.write(chunk)
-                                                            progress_bar.update(len(chunk))
+                                                            progress_bar.update(
+                                                                len(chunk)
+                                                            )
                                                     return True, None
                                         except Exception:
                                             continue
@@ -588,13 +680,25 @@ async def download_media(
                         # Try POST to simulate button click
                         try:
                             dbg("Trying POST on get.bunkrr file page")
-                            async with session.post(current_url, headers=headers, allow_redirects=True) as rpost:
-                                dbg(f"POST {current_url} -> {rpost.status} {rpost.headers.get('Content-Type','')}")
-                                if rpost.status in (200, 206) and 'text/html' not in (rpost.headers.get('Content-Type','').lower()):
-                                    base = get_filename(str(rpost.url), suggested_name, rpost.headers)
+                            async with session.post(
+                                current_url, headers=headers, allow_redirects=True
+                            ) as rpost:
+                                dbg(
+                                    f"POST {current_url} -> {rpost.status} {rpost.headers.get('Content-Type','')}"
+                                )
+                                if rpost.status in (200, 206) and "text/html" not in (
+                                    rpost.headers.get("Content-Type", "").lower()
+                                ):
+                                    base = get_filename(
+                                        str(rpost.url), suggested_name, rpost.headers
+                                    )
                                     file_path = dedupe_path(os.path.join(path, base))
-                                    file_size = int(rpost.headers.get("content-length", 0))
-                                    dbg(f"Saving to '{file_path}' size={file_size if file_size else 'unknown'}")
+                                    file_size = int(
+                                        rpost.headers.get("content-length", 0)
+                                    )
+                                    dbg(
+                                        f"Saving to '{file_path}' size={file_size if file_size else 'unknown'}"
+                                    )
                                     with open(file_path, "wb") as file, tqdm(
                                         desc=os.path.basename(file_path),
                                         total=file_size,
@@ -613,16 +717,35 @@ async def download_media(
                             pass
                         # Try adding ?download=1
                         if not next_url:
-                            alt = current_url + ("&download=1" if parts.query else "?download=1")
+                            alt = current_url + (
+                                "&download=1" if parts.query else "?download=1"
+                            )
                             try:
                                 dbg(f"Trying alt GET {alt}")
-                                async with session.get(alt, headers=headers, allow_redirects=True) as ralt:
-                                    dbg(f"GET {alt} -> {ralt.status} {ralt.headers.get('Content-Type','')}")
-                                    if ralt.status in (200, 206) and 'text/html' not in (ralt.headers.get('Content-Type','').lower()):
-                                        base = get_filename(str(ralt.url), suggested_name, ralt.headers)
-                                        file_path = dedupe_path(os.path.join(path, base))
-                                        file_size = int(ralt.headers.get("content-length", 0))
-                                        dbg(f"Saving to '{file_path}' size={file_size if file_size else 'unknown'}")
+                                async with session.get(
+                                    alt, headers=headers, allow_redirects=True
+                                ) as ralt:
+                                    dbg(
+                                        f"GET {alt} -> {ralt.status} {ralt.headers.get('Content-Type','')}"
+                                    )
+                                    if ralt.status in (
+                                        200,
+                                        206,
+                                    ) and "text/html" not in (
+                                        ralt.headers.get("Content-Type", "").lower()
+                                    ):
+                                        base = get_filename(
+                                            str(ralt.url), suggested_name, ralt.headers
+                                        )
+                                        file_path = dedupe_path(
+                                            os.path.join(path, base)
+                                        )
+                                        file_size = int(
+                                            ralt.headers.get("content-length", 0)
+                                        )
+                                        dbg(
+                                            f"Saving to '{file_path}' size={file_size if file_size else 'unknown'}"
+                                        )
                                         with open(file_path, "wb") as file, tqdm(
                                             desc=os.path.basename(file_path),
                                             total=file_size,
@@ -631,7 +754,9 @@ async def download_media(
                                             unit_divisor=1024,
                                             leave=False,
                                         ) as progress_bar:
-                                            while chunk := await ralt.content.read(1024):
+                                            while chunk := await ralt.content.read(
+                                                1024
+                                            ):
                                                 file.write(chunk)
                                                 progress_bar.update(len(chunk))
                                         return True, None
@@ -643,7 +768,10 @@ async def download_media(
                 if not next_url:
                     # Cannot resolve further
                     dbg(f"Could not resolve from HTML at {current_url}")
-                    return False, f"\n[!] Could not resolve download URL from {current_url}"
+                    return (
+                        False,
+                        f"\n[!] Could not resolve download URL from {current_url}",
+                    )
 
                 # Update referer to the page we just parsed and advance
                 headers["Referer"] = current_url
@@ -718,7 +846,9 @@ async def download_images_from_urls(
     async with ClientSession(timeout=timeout) as session:
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
-        async def download_media_wrapper(item):
+        async def download_media_wrapper(
+            item: str | Sequence[str],
+        ) -> tuple[bool, str | None]:
             # item can be a string (url) or a (url, nice_name) tuple
             if isinstance(item, (list, tuple)) and len(item) >= 2:
                 url, nice = item[0], item[1]
@@ -730,8 +860,10 @@ async def download_images_from_urls(
                 )
 
         active_urls = filtered
-        if LIMIT > 0 and len(active_urls) > LIMIT:
-            dbg(f"Limiting downloads to first {LIMIT} items out of {len(active_urls)} (skipped {len(skipped)})")
+        if 0 < LIMIT < len(active_urls):
+            dbg(
+                f"Limiting downloads to first {LIMIT} items out of {len(active_urls)} (skipped {len(skipped)})"
+            )
             active_urls = active_urls[:LIMIT]
         tasks = [download_media_wrapper(item) for item in active_urls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -741,7 +873,9 @@ async def download_images_from_urls(
         error_messages = []
 
         for item, result in zip(active_urls, results):
-            url = item[0] if isinstance(item, (list, tuple)) and len(item) >= 1 else item
+            url = (
+                item[0] if isinstance(item, (list, tuple)) and len(item) >= 1 else item
+            )
             if isinstance(result, Exception):
                 failed_files.append(url)
                 error_messages.append(f"\n[!] Error downloading '{url}': {result}")

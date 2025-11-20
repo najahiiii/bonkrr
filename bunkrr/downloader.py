@@ -7,12 +7,8 @@ from urllib.parse import urljoin
 
 from aiohttp import ClientSession
 
-from bunkrr.data_processing import (
-    create_download_folder,
-    download_images_from_urls,
-    fetch_data,
-)
-from bunkrr.utils import choices, get_user_folder, sanitize
+from bunkrr.data_processing import download_images_from_urls, fetch_data
+from bunkrr.utils import choices, create_download_folder, get_user_folder, sanitize
 
 
 async def fetch_album_data(
