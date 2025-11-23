@@ -72,7 +72,8 @@ def choices(prompt: str) -> Optional[None]:
 
 def get_user_folder(default_name: Optional[str] = None) -> str:
     """
-    Prompt user to enter album folder name. If left blank, use `default_name` or
+    Prompt user to enter album folder name.
+    If left blank, use `default_name` when provided (album name), otherwise
     fallback to 'downloads'.
 
     Args:
@@ -81,7 +82,10 @@ def get_user_folder(default_name: Optional[str] = None) -> str:
     Returns:
         str: Full path to the album folder, relative to current working directory.
     """
-    album = input("[?] Enter album folder name (leave blank for auto): ").strip()
+    prompt_default = default_name or DEFAULT_PARENT_FOLDER
+    album = input(
+        f"[?] Enter album folder name (leave blank for '{prompt_default}'): "
+    ).strip()
     cwd = os.getcwd()
 
     if album:

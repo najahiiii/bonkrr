@@ -1,13 +1,19 @@
 """This module contains the function to download images from bunkrr albums."""
 
+# pylint: disable=line-too-long
+
 import os
 import re
 from typing import List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from aiohttp import ClientSession
 
-from bunkrr.data_processing import download_images_from_urls, fetch_data
+from bunkrr.data_processing import (
+    MAX_CONCURRENT_DOWNLOADS,
+    download_images_from_urls,
+    fetch_data,
+)
 from bunkrr.utils import choices, create_download_folder, get_user_folder, sanitize
 
 
@@ -44,10 +50,34 @@ def build_download_urls(image_data: list, base_url: str) -> List[Tuple[str, str]
         List[Tuple[str, str]]: Each tuple contains:
             - url (str): The full URL to the image.
             - suggested_name (str): The suggested filename for saving the image.
+            - referer (str): Optional referer header to use.
+            - fallback_url (str): Optional /f/<slug> URL for fallback resolution.
     """
     urls: List[Tuple[str, str]] = []
     seen: set[str] = set()
+    base_parts = urlsplit(base_url)
+    base_origin = f"{base_parts.scheme}://{base_parts.netloc}"
     for data in image_data:
+        if isinstance(data, dict) and "slug" in data:
+            slug = data.get("slug")
+            if not slug:
+                continue
+            origin = data.get("origin") or base_origin
+            nice = str(data.get("original") or data.get("name") or "")
+            cdn_origin = data.get("cdn_origin")
+            cdn_endpoint = data.get("cdn_endpoint")
+            referer = data.get("referer") or base_url
+            fallback_url = urljoin(origin, f"/f/{slug}")
+            if cdn_origin and cdn_endpoint:
+                direct = urljoin(str(cdn_origin), str(cdn_endpoint))
+            else:
+                direct = fallback_url
+
+            key = f"{direct}|{nice}"
+            if key not in seen:
+                seen.add(key)
+                urls.append((direct, nice, referer, fallback_url))
+            continue
         # Prefer the closest ancestor anchor; avoids picking pagination links
         href = None
         # Most layouts: the text box <div> sits next to an <a> (thumbnail link)
@@ -80,12 +110,57 @@ def build_download_urls(image_data: list, base_url: str) -> List[Tuple[str, str]
                 urls.append((href, nice))
             continue
 
-        # Fallback to old heuristic using thumbnail src if anchor not found
-        # Avoid using thumbnail URLs as they are not the actual files
-        # If no anchor was found, skip this entry to prevent noise
-        continue
-
     return urls
+
+
+def _summarize_items(image_data: list) -> tuple[dict[str, int], int]:
+    """Count item types and sum sizes (bytes) from albumFiles entries."""
+    counts = {"image": 0, "video": 0, "archive": 0, "other": 0}
+    total_size = 0
+
+    for data in image_data:
+        media_type = ""
+        size = 0
+        if isinstance(data, dict):
+            media_type = (data.get("type") or "").lower()
+            try:
+                size = int(data.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            ext_label = (data.get("extension") or "").lower()
+        else:
+            ext_label = ""
+
+        if media_type.startswith("image/") or ext_label == "image":
+            counts["image"] += 1
+        elif media_type.startswith("video/") or ext_label == "video":
+            counts["video"] += 1
+        elif (
+            "zip" in media_type
+            or "rar" in media_type
+            or "7z" in media_type
+            or "tar" in media_type
+            or ext_label == "archive"
+        ):
+            counts["archive"] += 1
+        else:
+            counts["other"] += 1
+
+        if size > 0:
+            total_size += size
+
+    return counts, total_size
+
+
+def _format_size(num_bytes: int) -> str:
+    """Return human readable size string."""
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(num_bytes)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
 
 
 async def download_album(
@@ -114,6 +189,19 @@ async def download_album(
     if not image_data:
         return 0, 0, []
 
+    counts, total_size = _summarize_items(image_data)
+    total_files = len(image_data)
+    print(
+        f"[*] Files: {total_files} "
+        f"(image {counts['image']}, video {counts['video']}, archive {counts['archive']}, other {counts['other']}) "
+        f"~{_format_size(total_size)}"
+    )
+    effective_conc = min(MAX_CONCURRENT_DOWNLOADS, total_files) if total_files else 0
+    print(
+        f"[*] Concurrency: using {effective_conc} workers "
+        f"(max {MAX_CONCURRENT_DOWNLOADS}, set via BUNKR_CONCURRENCY)"
+    )
+
     folder = folder_name or sanitize(album_name or "album")
     # Avoid double-nesting when parent_folder already ends with the album folder
     parent_tail = os.path.basename(os.path.normpath(parent_folder))
@@ -122,7 +210,7 @@ async def download_album(
     else:
         folder_path = await create_download_folder(parent_folder, folder)
     download_urls = build_download_urls(image_data, url)
-    print(f"[*] Found {len(download_urls)} file(s). Starting downloads...")
+    print("[*] Starting downloads...")
 
     return await download_images_from_urls(download_urls, folder_path)
 

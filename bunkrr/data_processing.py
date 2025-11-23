@@ -3,6 +3,7 @@
 # pylint: disable=broad-exception-caught,line-too-long
 
 import asyncio
+import json
 import os
 import re
 from typing import Mapping, Sequence
@@ -65,6 +66,7 @@ async def _stream_response_to_file(
         unit_scale=True,
         unit_divisor=1024,
         leave=False,
+        position=1,
     ) as progress_bar:
         while chunk := await response.content.read(1024):
             file.write(chunk)
@@ -75,142 +77,167 @@ async def fetch_data(
     session: ClientSession, base_url: str, data_type: str
 ) -> str | list | None:
     """
-    Fetches either image data or album information from a given URL.
+    Fetch album info or media blocks from a bunkr album page.
 
-    Args:
-        session (aiohttp.ClientSession): The aiohttp client session.
-        base_url (str): The base URL to fetch data from.
-        data_type (str): Type of data to fetch ('image' or 'album').
-
-    Returns:
-        str or list: The name of the album if 'album' type or a list of image data.
+    Uses the `?advanced=1` view to get the full list in a single page, avoiding
+    pagination probes.
     """
+
+    def with_advanced(u: str) -> str:
+        parts = urlsplit(u)
+        q = dict(parse_qsl(parts.query))
+        q.pop("page", None)
+        q["advanced"] = "1"
+        return urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, urlencode(q), parts.fragment)
+        )
+
+    target_url = with_advanced(base_url)
+    headers = {
+        "User-Agent": get_random_user_agent(),
+        "Referer": "https://bunkr.ac/",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.7",
+        "Connection": "keep-alive",
+    }
+
     try:
-        async with session.get(base_url) as response:
-            response.raise_for_status()
-            html = await response.text()
+        parts = urlsplit(target_url)
+        hosts = [parts.netloc]
+        if parts.netloc.startswith("bunkr"):
+            for alt in ("bunkr.si", "bunkrr.su", "bunkr.is"):
+                if alt not in hosts:
+                    hosts.append(alt)
 
-            soup = BeautifulSoup(html, "html.parser")
-            if data_type == "album-name":
-                album_info = soup.find("div", class_="sm:text-lg")
-                if album_info:
-                    album_name = album_info.find("h1").text.strip()
-                    return album_name
-                return None
-            if data_type == "image-url":
+        html = None
+        soup = None
+        last_exc: Exception | None = None
+        used_host = None
 
-                def extract_blocks(markup: str) -> tuple[BeautifulSoup, list]:
-                    s = BeautifulSoup(markup, "html.parser")
-                    out = []
-                    out.extend(s.find_all("div", class_="grid-images_box-txt"))
-                    out.extend(s.find_all("div", class_="grid-videos_box-txt"))
-                    return s, out
+        for host in hosts:
+            candidate_url = urlunsplit(
+                (parts.scheme, host, parts.path, parts.query, parts.fragment)
+            )
+            try:
+                async with session.get(candidate_url, headers=headers) as response:
+                    response.raise_for_status()
+                    html = await response.text()
+                    soup = BeautifulSoup(html, "html.parser")
+                    used_host = host
+                    if host != parts.netloc:
+                        dbg(f"Fetched via fallback host {host}")
+                    break
+            except Exception as e:  # pragma: no cover - network fallback path
+                last_exc = e
+                dbg(f"Fetch attempt failed for {candidate_url}: {e}")
+                continue
 
-                def block_item_id(block) -> str | None:
-                    # Prefer the thumbnail anchor next to the text box
-                    a = block.find_previous_sibling("a", href=True)
-                    if not a and block.parent:
-                        a = block.parent.find("a", href=True)
-                    href = a.get("href") if a else None
-                    if not href:
-                        return None
-                    m = re.search(r"/(f|i|v)/([A-Za-z0-9]+)", href)
+        if soup is None:
+            if last_exc:
+                raise last_exc
+            return None
+
+        origin = urlunsplit((parts.scheme, used_host or parts.netloc, "", "", ""))
+
+        if data_type == "album-name":
+            album_info = soup.find("div", class_="sm:text-lg")
+            if album_info:
+                album_name = album_info.find("h1").text.strip()
+                return album_name
+            return None
+
+        if data_type == "image-url":
+
+            def parse_album_files(doc: BeautifulSoup) -> list[dict]:
+                for script in doc.find_all("script"):
+                    text = script.string or script.get_text()
+                    if not text or "window.albumFiles" not in text:
+                        continue
+                    m = re.search(r"window\.albumFiles\s*=\s*(\[.*?]);", text, re.S)
                     if not m:
-                        return None
-                    return f"{m.group(1)}/{m.group(2)}"
+                        continue
+                    raw = m.group(1)
+                    normalized = re.sub(r"(?m)^(\s*)([A-Za-z0-9_]+):", r'\1"\2":', raw)
+                    normalized = re.sub(r",\s*([}\]])", r"\1", normalized)
+                    try:
+                        return json.loads(normalized)
+                    except json.JSONDecodeError:
+                        continue
+                return []
 
-                _, blocks1 = extract_blocks(html)
-                seen_ids: set[str] = set()
-                unique_blocks: list = []
-                for b in blocks1:
-                    bid = block_item_id(b)
-                    if bid and bid not in seen_ids:
-                        seen_ids.add(bid)
-                        unique_blocks.append(b)
-                dbg(
-                    f"Album page 1: found {len(unique_blocks)} unique items (raw {len(blocks1)})"
-                )
-                blocks = unique_blocks
-
-                # Strategy 1: detect pagination count from links
-                page_nums: list[int] = []
-                for a in soup.find_all("a", href=True):
-                    m = re.search(r"[?&]page=(\\d+)", a["href"])
-                    if m:
-                        try:
-                            page_nums.append(int(m.group(1)))
-                        except ValueError:
-                            pass
-
-                fetched_pages = {1}
-
-                def with_page(u: str, page_num: int) -> str:
-                    parts = urlsplit(u)
-                    q = dict(parse_qsl(parts.query))
-                    q["page"] = str(page_num)
-                    return urlunsplit(
-                        (
-                            parts.scheme,
-                            parts.netloc,
-                            parts.path,
-                            urlencode(q),
-                            parts.fragment,
-                        )
+            album_files = parse_album_files(soup)
+            if album_files:
+                blocks = []
+                for f in album_files:
+                    slug = f.get("slug")
+                    if not slug:
+                        continue
+                    blocks.append(
+                        {
+                            "slug": slug,
+                            "original": f.get("original") or f.get("name") or "",
+                            "origin": origin,
+                            "cdn_endpoint": f.get("cdnEndpoint"),
+                            "cdn_origin": None,
+                            "referer": target_url,
+                            "type": f.get("type"),
+                            "size": f.get("size"),
+                        }
                     )
-
-                if page_nums:
-                    max_page = max(page_nums)
-                    for pnum in range(2, max_page + 1):
-                        page_url = with_page(base_url, pnum)
+                    thumb = f.get("thumbnail")
+                    if thumb:
                         try:
-                            async with session.get(page_url) as r2:
-                                r2.raise_for_status()
-                                html2 = await r2.text()
-                                _, raw_blocks = extract_blocks(html2)
-                                added = 0
-                                for b in raw_blocks:
-                                    bid = block_item_id(b)
-                                    if bid and bid not in seen_ids:
-                                        seen_ids.add(bid)
-                                        blocks.append(b)
-                                        added += 1
-                                fetched_pages.add(pnum)
-                                dbg(
-                                    f"Album page {pnum}: added {added} new items (raw {len(raw_blocks)})"
-                                )
+                            tparts = urlsplit(str(thumb))
+                            blocks[-1][
+                                "cdn_origin"
+                            ] = f"{tparts.scheme}://{tparts.netloc}"
                         except Exception:
-                            continue
-
-                # Strategy 2 (fallback): probe subsequent pages until empty
-                if fetched_pages == {1}:
-                    for pnum in range(2, 201):  # practical upper bound
-                        page_url = with_page(base_url, pnum)
-                        try:
-                            async with session.get(page_url) as r2:
-                                if r2.status >= 400:
-                                    break
-                                html2 = await r2.text()
-                                _, raw_blocks = extract_blocks(html2)
-                                added = 0
-                                for b in raw_blocks:
-                                    bid = block_item_id(b)
-                                    if bid and bid not in seen_ids:
-                                        seen_ids.add(bid)
-                                        blocks.append(b)
-                                        added += 1
-                                fetched_pages.add(pnum)
-                                dbg(
-                                    f"Album page {pnum}: added {added} new items (probe raw {len(raw_blocks)})"
-                                )
-                                if added == 0:
-                                    break
-                        except Exception:
-                            break
-
+                            pass
+                    if not blocks[-1]["cdn_origin"] and f.get("cdnEndpoint"):
+                        # Fallback to album host if thumbnail missing
+                        blocks[-1]["cdn_origin"] = origin
+                dbg(f"Album advanced JSON: found {len(blocks)} item(s)")
                 if not blocks:
                     print("\n[!] Failed to grab file URLs.")
                     return None
                 return blocks
+
+            def extract_blocks(doc: BeautifulSoup) -> list:
+                out = []
+                out.extend(doc.find_all("div", class_="grid-images_box-txt"))
+                out.extend(doc.find_all("div", class_="grid-videos_box-txt"))
+                return out
+
+            def block_item_id(block) -> str | None:
+                # Prefer the thumbnail anchor next to the text box
+                a = block.find_previous_sibling("a", href=True)
+                if not a and block.parent:
+                    a = block.parent.find("a", href=True)
+                href = a.get("href") if a else None
+                if not href:
+                    return None
+                m = re.search(r"/(f|i|v)/([A-Za-z0-9]+)", href)
+                if not m:
+                    return None
+                return f"{m.group(1)}/{m.group(2)}"
+
+            raw_blocks = extract_blocks(soup)
+            seen_ids: set[str] = set()
+            blocks: list = []
+            for b in raw_blocks:
+                bid = block_item_id(b)
+                if bid and bid not in seen_ids:
+                    seen_ids.add(bid)
+                    blocks.append(b)
+
+            dbg(
+                f"Album advanced view: found {len(blocks)} unique items (raw {len(raw_blocks)})"
+            )
+
+            if not blocks:
+                print("\n[!] Failed to grab file URLs.")
+                return None
+            return blocks
     except client_exceptions.InvalidURL as e:
         print(f"\n[!] Invalid URL: {e}")
         return None
@@ -220,7 +247,13 @@ async def fetch_data(
 
 
 async def download_media(
-    session: ClientSession, url: str, path: str, suggested_name: str | None = None
+    session: ClientSession,
+    url: str,
+    path: str,
+    suggested_name: str | None = None,
+    referer: str | None = None,
+    fallback_url: str | None = None,
+    _used_fallback: bool = False,
 ) -> tuple[bool, str | None]:
     """
     Resolve final media URL using file id + API, then download to disk.
@@ -238,7 +271,7 @@ async def download_media(
     try:
         headers = {
             "User-Agent": get_random_user_agent(),
-            "Referer": "https://bunkr.ac/",
+            "Referer": referer or "https://bunkr.ac/",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.7",
             "Connection": "keep-alive",
@@ -274,6 +307,16 @@ async def download_media(
 
         async with initial_resp:
             if initial_resp.status not in (200, 206):
+                if fallback_url and not _used_fallback:
+                    return await download_media(
+                        session,
+                        fallback_url,
+                        path,
+                        suggested_name,
+                        referer=referer,
+                        fallback_url=None,
+                        _used_fallback=True,
+                    )
                 return False, f"\n[!] HTTP {initial_resp.status} at {url}"
 
             ctype = initial_resp.headers.get("Content-Type", "")
@@ -285,6 +328,20 @@ async def download_media(
                 return True, None
 
             html = await initial_resp.text()
+            if (
+                fallback_url
+                and not _used_fallback
+                and "/f/" not in str(initial_resp.url)
+            ):
+                return await download_media(
+                    session,
+                    fallback_url,
+                    path,
+                    suggested_name,
+                    referer=referer,
+                    fallback_url=None,
+                    _used_fallback=True,
+                )
             soup = BeautifulSoup(html, "html.parser")
             fid = None
             node = soup.find(attrs={"data-file-id": True}) or soup.find(
@@ -405,28 +462,50 @@ async def download_images_from_urls(
     if skipped:
         dbg(f"Skipping {len(skipped)} existing file(s)")
 
+    active_urls = filtered
+    if 0 < LIMIT < len(active_urls):
+        dbg(
+            f"Limiting downloads to first {LIMIT} items out of {len(active_urls)} (skipped {len(skipped)})"
+        )
+        active_urls = active_urls[:LIMIT]
+
     async with ClientSession(timeout=timeout) as session:
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+        progress_bar = tqdm(
+            total=len(active_urls),
+            desc="Files",
+            unit="file",
+            leave=False,
+            position=0,
+        )
+        pbar_lock = asyncio.Lock()
 
         async def download_media_wrapper(
             item: str | Sequence[str],
         ) -> tuple[bool, str | None]:
             # item can be a string (url) or a (url, nice_name) tuple
-            if isinstance(item, (list, tuple)) and len(item) >= 2:
-                url, nice = item[0], item[1]
+            referer = None
+            fallback_url = None
+            if isinstance(item, (list, tuple)):
+                url = item[0]
+                nice = item[1] if len(item) >= 2 else None
+                referer = item[2] if len(item) >= 3 else None
+                fallback_url = item[3] if len(item) >= 4 else None
             else:
                 url, nice = item, None
             async with semaphore:
-                return await download_media(
-                    session, url, album_folder, suggested_name=nice
+                result = await download_media(
+                    session,
+                    url,
+                    album_folder,
+                    suggested_name=nice,
+                    referer=referer,
+                    fallback_url=fallback_url,
                 )
+            async with pbar_lock:
+                progress_bar.update(1)
+            return result
 
-        active_urls = filtered
-        if 0 < LIMIT < len(active_urls):
-            dbg(
-                f"Limiting downloads to first {LIMIT} items out of {len(active_urls)} (skipped {len(skipped)})"
-            )
-            active_urls = active_urls[:LIMIT]
         tasks = [download_media_wrapper(item) for item in active_urls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -449,5 +528,7 @@ async def download_images_from_urls(
                 failed_files.append(url)
                 if err:
                     error_messages.append(err)
+
+        progress_bar.close()
 
         return downloaded_files, failed_files, error_messages
