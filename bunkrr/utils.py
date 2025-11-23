@@ -70,7 +70,7 @@ def choices(prompt: str) -> Optional[None]:
         sys.exit(1)
 
 
-def get_user_folder(default_name: Optional[str] = None) -> str:
+def get_user_folder(default_name: Optional[str] = None) -> tuple[str, bool]:
     """
     Prompt user to enter album folder name.
     If left blank, use `default_name` when provided (album name), otherwise
@@ -80,7 +80,8 @@ def get_user_folder(default_name: Optional[str] = None) -> str:
         default_name (Optional[str]): Optional default folder name to use if user input is blank.
 
     Returns:
-        str: Full path to the album folder, relative to current working directory.
+        Tuple[str, bool]: (path, is_custom) where is_custom is True if the user
+        typed a value manually.
     """
     prompt_default = default_name or DEFAULT_PARENT_FOLDER
     album = input(
@@ -90,12 +91,13 @@ def get_user_folder(default_name: Optional[str] = None) -> str:
 
     if album:
         album_folder = os.path.join(cwd, DEFAULT_PARENT_FOLDER, album)
+        return album_folder, True
     elif default_name:
         album_folder = os.path.join(cwd, DEFAULT_PARENT_FOLDER, default_name)
     else:
         album_folder = os.path.join(cwd, DEFAULT_PARENT_FOLDER)
 
-    return album_folder
+    return album_folder, False
 
 
 def sanitize(name: Optional[str]) -> str:

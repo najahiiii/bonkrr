@@ -168,6 +168,7 @@ async def download_album(
     url: str,
     parent_folder: str,
     folder_name: Optional[str] = None,
+    use_parent_as_target: bool = False,
 ) -> Tuple[int, int, List[str]]:
     """
     Download all images from a single album URL into a specified folder.
@@ -203,12 +204,15 @@ async def download_album(
     )
 
     folder = folder_name or sanitize(album_name or "album")
-    # Avoid double-nesting when parent_folder already ends with the album folder
-    parent_tail = os.path.basename(os.path.normpath(parent_folder))
-    if parent_tail == folder:
+    if use_parent_as_target:
         folder_path = await create_download_folder(parent_folder)
     else:
-        folder_path = await create_download_folder(parent_folder, folder)
+        # Avoid double-nesting when parent_folder already ends with the album folder
+        parent_tail = os.path.basename(os.path.normpath(parent_folder))
+        if parent_tail == folder:
+            folder_path = await create_download_folder(parent_folder)
+        else:
+            folder_path = await create_download_folder(parent_folder, folder)
     download_urls = build_download_urls(image_data, url)
     print("[*] Starting downloads...")
 
@@ -243,23 +247,34 @@ async def downloader() -> None:
 
         async with ClientSession() as session:
             if len(urls) == 1:
-                parent_folder = get_user_folder(
+                parent_folder, custom = get_user_folder(
                     default_name=sanitize(
                         await fetch_data(session, urls[0], "album-name")
                     )
                     or "album"
                 )
                 downloaded, failed, errors = await download_album(
-                    session, urls[0], parent_folder
+                    session,
+                    urls[0],
+                    parent_folder,
+                    use_parent_as_target=custom,
                 )
                 total_downloaded += len(downloaded)
                 total_failed += len(failed)
                 all_errors.extend(errors)
             else:
                 for count, url in enumerate(urls, start=1):
-                    parent_folder = get_user_folder()
+                    album_name = await fetch_data(session, url, "album-name")
+                    safe_album = sanitize(album_name) if album_name else None
+                    parent_folder, custom = get_user_folder(
+                        default_name=safe_album or str(count)
+                    )
                     downloaded, failed, errors = await download_album(
-                        session, url, parent_folder, folder_name=str(count)
+                        session,
+                        url,
+                        parent_folder,
+                        folder_name=None if custom else safe_album or str(count),
+                        use_parent_as_target=custom,
                     )
                     total_downloaded += len(downloaded)
                     total_failed += len(failed)
