@@ -169,7 +169,7 @@ async def download_album(
     parent_folder: str,
     folder_name: Optional[str] = None,
     use_parent_as_target: bool = False,
-) -> Tuple[int, int, List[str]]:
+) -> Tuple[List[str], List[str], List[str]]:
     """
     Download all images from a single album URL into a specified folder.
 
@@ -181,14 +181,14 @@ async def download_album(
         Defaults to None.
 
     Returns:
-        Tuple[int, int, List[str]]:
-            - downloaded_count (int): Number of successfully downloaded files.
-            - failed_count (int): Number of failed downloads.
-            - errors (List[str]): List of error messages encountered during download.
+        Tuple[List[str], List[str], List[str]]:
+            - downloaded (List[str]): URLs that were successfully downloaded.
+            - failed (List[str]): URLs that failed to download.
+            - errors (List[str]): Error messages encountered during download.
     """
     album_name, image_data = await fetch_album_data(session, url)
     if not image_data:
-        return 0, 0, []
+        return [], [], []
 
     counts, total_size = _summarize_items(image_data)
     total_files = len(image_data)

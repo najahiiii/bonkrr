@@ -159,6 +159,9 @@ async def fetch_data(
                     raw = m.group(1)
                     normalized = re.sub(r"(?m)^(\s*)([A-Za-z0-9_]+):", r'\1"\2":', raw)
                     normalized = re.sub(r",\s*([}\]])", r"\1", normalized)
+                    # Some album names contain \" or \' which break strict JSON parsing.
+                    # Normalize the single-quote escape so json.loads can handle it.
+                    normalized = normalized.replace("\\'", "'")
                     try:
                         return json.loads(normalized)
                     except json.JSONDecodeError:
