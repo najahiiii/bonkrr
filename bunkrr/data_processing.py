@@ -149,6 +149,15 @@ async def fetch_data(
         if data_type == "image-url":
 
             def parse_album_files(doc: BeautifulSoup) -> list[dict]:
+                def normalize_album_json(raw: str) -> str:
+                    # Quote keys, drop trailing commas, and repair invalid escape sequences.
+                    out = re.sub(r"(?m)^(\s*)([A-Za-z0-9_]+):", r'\1"\2":', raw)
+                    out = re.sub(r",\s*([}\]])", r"\1", out)
+                    out = out.replace("\\'", "'")
+                    # Any backslash not forming a valid JSON escape is doubled to stay parseable.
+                    out = re.sub(r"\\(?![\\\\\"/bfnrtu])", r"\\\\", out)
+                    return out
+
                 for script in doc.find_all("script"):
                     text = script.string or script.get_text()
                     if not text or "window.albumFiles" not in text:
@@ -156,12 +165,7 @@ async def fetch_data(
                     m = re.search(r"window\.albumFiles\s*=\s*(\[.*?]);", text, re.S)
                     if not m:
                         continue
-                    raw = m.group(1)
-                    normalized = re.sub(r"(?m)^(\s*)([A-Za-z0-9_]+):", r'\1"\2":', raw)
-                    normalized = re.sub(r",\s*([}\]])", r"\1", normalized)
-                    # Some album names contain \" or \' which break strict JSON parsing.
-                    # Normalize the single-quote escape so json.loads can handle it.
-                    normalized = normalized.replace("\\'", "'")
+                    normalized = normalize_album_json(m.group(1))
                     try:
                         return json.loads(normalized)
                     except json.JSONDecodeError:
