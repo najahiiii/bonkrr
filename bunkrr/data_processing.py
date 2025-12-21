@@ -13,7 +13,6 @@ from aiohttp import ClientResponse, ClientSession, ClientTimeout, client_excepti
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 
-from bunkrr.api import resolve_bunkr_url
 from bunkrr.utils import dedupe_path, get_filename, get_random_user_agent
 
 MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("BUNKR_CONCURRENCY", "12") or 12)
@@ -334,12 +333,7 @@ async def download_media(
                 await _stream_response_to_file(initial_resp, file_path, file_size)
                 return True, None
 
-            html = await initial_resp.text()
-            if (
-                fallback_url
-                and not _used_fallback
-                and "/f/" not in str(initial_resp.url)
-            ):
+            if fallback_url and not _used_fallback:
                 return await download_media(
                     session,
                     fallback_url,
@@ -349,67 +343,10 @@ async def download_media(
                     fallback_url=None,
                     _used_fallback=True,
                 )
-            soup = BeautifulSoup(html, "html.parser")
-            fid = None
-            node = soup.find(attrs={"data-file-id": True}) or soup.find(
-                attrs={"data-id": True}
+            return (
+                False,
+                f"\n[!] Expected media but got HTML at {initial_resp.url}",
             )
-            if node:
-                fid = node.get("data-file-id") or node.get("data-id")
-            if not fid:
-                m_id = re.search(r'data-file-id\s*=\s*"([^"]+)"', html)
-                if m_id:
-                    fid = m_id.group(1)
-
-            if not fid:
-                return False, f"\n[!] Could not find file id for {url}"
-
-            try:
-                final_url = await resolve_bunkr_url(
-                    fid, ogname=suggested_name, session=session
-                )
-            except Exception as e:  # pragma: no cover - API failure path
-                return False, f"\n[!] Failed to resolve file id {fid}: {e}"
-
-            dbg(f"Resolved via API: {fid} -> {final_url}")
-            attempt = 0
-            while True:
-                async with session.get(
-                    final_url, headers=headers, allow_redirects=True
-                ) as media_resp:
-                    dbg(
-                        f"GET {final_url} -> {media_resp.status} {media_resp.headers.get('Content-Type','')}"
-                    )
-                    if media_resp.status == 429:
-                        if attempt == 0 or attempt % 3 == 0:
-                            tqdm.write(
-                                f"[~] Got 429 on media fetch (attempt {attempt + 1}) for {final_url}"
-                            )
-                        retry_after = media_resp.headers.get("Retry-After")
-                        delay = (
-                            float(retry_after)
-                            if retry_after and str(retry_after).isdigit()
-                            else 1.5 * (2**attempt)
-                        )
-                        await asyncio.sleep(delay)
-                        attempt += 1
-                        continue
-                    if media_resp.status not in (200, 206):
-                        return False, f"\n[!] HTTP {media_resp.status} at {final_url}"
-                    if (
-                        "text/html"
-                        in media_resp.headers.get("Content-Type", "").lower()
-                    ):
-                        return (
-                            False,
-                            f"\n[!] Expected media but got HTML at {final_url}",
-                        )
-                    file_path, file_size = _media_save_path(
-                        path, str(media_resp.url), suggested_name, media_resp.headers
-                    )
-                    await _stream_response_to_file(media_resp, file_path, file_size)
-                    return True, None
-                return False, f"\n[!] HTTP 429 rate limit at {final_url} after retries"
 
     except (asyncio.TimeoutError, client_exceptions.ServerTimeoutError) as e:
         target = file_path if file_path else (suggested_name or url)

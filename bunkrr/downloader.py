@@ -39,6 +39,11 @@ async def fetch_album_data(
     return album_name, image_data
 
 
+def is_single_file_url(url: str) -> bool:
+    """Detect bunkr single file URLs (/f/, /i/, /v/)."""
+    return bool(re.search(r"/(f|i|v)/[A-Za-z0-9]+", url))
+
+
 def build_download_urls(image_data: list, base_url: str) -> List[Tuple[str, str]]:
     """
     Build a list of tuples containing full image URLs and suggested filenames.
@@ -240,6 +245,14 @@ async def downloader() -> None:
                 urls = [line.strip() for line in f if line.strip()]
         else:
             urls = [u.strip() for u in raw_input.split(",") if u.strip()]
+
+        single_urls = [u for u in urls if is_single_file_url(u)]
+        if single_urls:
+            print(
+                "[!] Single file URLs are not supported. "
+                "Please provide album URL(s)."
+            )
+            continue
 
         total_downloaded = 0
         total_failed = 0
