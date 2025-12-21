@@ -53,8 +53,11 @@ async def resolve_bunkr_url(
     timeout = ClientTimeout(total=None, connect=30, sock_connect=30, sock_read=300)
     headers = {
         "Content-Type": "application/json",
+        "Accept": "*/*",
         "User-Agent": get_random_user_agent(),
+        "Origin": "https://get.bunkrr.su",
         "Referer": f"https://get.bunkrr.su/file/{file_id}",
+        "Accept-Language": "en-US,en;q=0.8",
     }
 
     async def _call_with_retry(sess: ClientSession) -> dict:
