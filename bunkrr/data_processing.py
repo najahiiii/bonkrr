@@ -13,6 +13,7 @@ from aiohttp import ClientResponse, ClientSession, ClientTimeout, client_excepti
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 
+from bunkrr.api import resolve_bunkr_url
 from bunkrr.utils import dedupe_path, get_filename, get_random_user_agent
 
 MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("BUNKR_CONCURRENCY", "12") or 12)
@@ -38,6 +39,32 @@ def dbg(msg: str) -> None:
     """
     if DEBUG:
         print(f"[debug] {msg}")
+
+
+def _extract_file_id_from_html(html: str) -> str | None:
+    """Extract numeric bunkr `file_id` from a media HTML page."""
+    patterns = (
+        r"""data-file-id\s*=\s*["']?(\d+)["']?""",
+        r"""data-id\s*=\s*["']?(\d+)["']?""",
+        r"""/file/(\d+)""",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, html, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _extract_ogname_from_html(html: str) -> str | None:
+    """Extract `ogname` javascript variable from download bridge HTML."""
+    match = re.search(
+        r"""var\s+ogname\s*=\s*["']([^"']+)["']""",
+        html,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return match.group(1).strip() or None
 
 
 def _media_save_path(
@@ -279,6 +306,7 @@ class BunkrClient:
         referer: str | None = None,
         fallback_url: str | None = None,
         _used_fallback: bool = False,
+        _used_api_resolve: bool = False,
     ) -> tuple[bool, str | None]:
         """
         Download a media URL (or fallback) to disk.
@@ -347,6 +375,40 @@ class BunkrClient:
                     await _stream_response_to_file(initial_resp, file_path, file_size)
                     return True, None
 
+                # HTML response on media page: try API resolver once using file_id
+                # from page markup (data-file-id / get.bunkrr bridge).
+                if not _used_api_resolve:
+                    try:
+                        html_text = await initial_resp.text(errors="ignore")
+                        file_id = _extract_file_id_from_html(html_text)
+                        if file_id:
+                            resolved_name = (
+                                _extract_ogname_from_html(html_text) or suggested_name
+                            )
+                            resolved_url = await resolve_bunkr_url(
+                                file_id=file_id,
+                                ogname=resolved_name,
+                                session=self.session,
+                            )
+                            dbg(
+                                f"Resolved via API: file_id={file_id} -> {resolved_url}"
+                            )
+                            return await self.download_media(
+                                resolved_url,
+                                path,
+                                suggested_name=resolved_name,
+                                referer=f"https://get.bunkrr.su/file/{file_id}",
+                                fallback_url=None,
+                                _used_fallback=True,
+                                _used_api_resolve=True,
+                            )
+                    except (
+                        ValueError,
+                        client_exceptions.ClientError,
+                        asyncio.TimeoutError,
+                    ) as e:
+                        dbg(f"API resolve failed for {url}: {e}")
+
                 if fallback_url and not _used_fallback:
                     return await self.download_media(
                         fallback_url,
@@ -355,6 +417,7 @@ class BunkrClient:
                         referer=referer,
                         fallback_url=None,
                         _used_fallback=True,
+                        _used_api_resolve=_used_api_resolve,
                     )
                 return (
                     False,
@@ -480,6 +543,7 @@ async def download_media(
     referer: str | None = None,
     fallback_url: str | None = None,
     _used_fallback: bool = False,
+    _used_api_resolve: bool = False,
 ) -> tuple[bool, str | None]:
     """Wrapper: use a transient BunkrClient to download a single media URL."""
     return await BunkrClient(session).download_media(
@@ -489,6 +553,7 @@ async def download_media(
         referer=referer,
         fallback_url=fallback_url,
         _used_fallback=_used_fallback,
+        _used_api_resolve=_used_api_resolve,
     )
 
 

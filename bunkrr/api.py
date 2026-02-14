@@ -11,7 +11,10 @@ from aiohttp import ClientSession, ClientTimeout, client_exceptions
 
 from bunkrr.utils import get_random_user_agent
 
-API_URL = "https://apidl.bunkr.ru/api/_001_v2"
+API_URLS = (
+    "https://get.bunkrr.su/api/_001_v2",
+    "https://apidl.bunkr.ru/api/_001_v2",
+)
 
 
 def _b64_to_bytes(b64_str: str) -> bytes:
@@ -62,29 +65,36 @@ async def resolve_bunkr_url(
 
     async def _call_with_retry(sess: ClientSession) -> dict:
         last_exc: Exception | None = None
-        for attempt in range(max_retries):
-            try:
-                async with sess.post(
-                    API_URL, json={"id": file_id}, headers=headers
-                ) as resp:
-                    if resp.status == 429:
-                        retry_after = resp.headers.get("Retry-After")
-                        delay = (
-                            float(retry_after)
-                            if retry_after and retry_after.isdigit()
-                            else backoff_base * (2**attempt)
+        for api_url in API_URLS:
+            for attempt in range(max_retries):
+                try:
+                    async with sess.post(
+                        api_url, json={"id": file_id}, headers=headers
+                    ) as resp:
+                        if resp.status == 429:
+                            retry_after = resp.headers.get("Retry-After")
+                            delay = (
+                                float(retry_after)
+                                if retry_after and retry_after.isdigit()
+                                else backoff_base * (2**attempt)
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        resp.raise_for_status()
+                        data = await resp.json()
+                        if data.get("encrypted"):
+                            return data
+                        last_exc = ValueError(
+                            f"Invalid response from {api_url}: {data}"
                         )
-                        await asyncio.sleep(delay)
-                        continue
-                    resp.raise_for_status()
-                    return await resp.json()
-            except client_exceptions.ClientError as e:
-                last_exc = e
-                delay = backoff_base * (2**attempt)
-                await asyncio.sleep(delay)
-            except Exception as e:
-                last_exc = e
-                break
+                        break
+                except client_exceptions.ClientError as e:
+                    last_exc = e
+                    delay = backoff_base * (2**attempt)
+                    await asyncio.sleep(delay)
+                except Exception as e:
+                    last_exc = e
+                    break
         if last_exc:
             raise last_exc
         raise RuntimeError("Unexpected retry loop exit")
