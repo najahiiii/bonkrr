@@ -538,12 +538,83 @@ def _parse_album_selection(
     return selected
 
 
+MANAGED_MENU_OPTIONS: tuple[tuple[str, str, str], ...] = (
+    ("A", "Add album", "add"),
+    ("M", "Manage media", "media"),
+    ("S", "Sync metadata", "sync"),
+    ("T", "Toggle remove policy", "toggle"),
+    ("R", "Remove album", "remove"),
+    ("B", "Back", "back/q"),
+)
+MANAGED_ACTION_ALIASES: dict[str, str] = {
+    "a": "add",
+    "add": "add",
+    "m": "media",
+    "media": "media",
+    "s": "sync",
+    "sync": "sync",
+    "t": "toggle",
+    "toggle": "toggle",
+    "r": "remove",
+    "remove": "remove",
+    "b": "back",
+    "q": "back",
+    "back": "back",
+}
+
+MEDIA_MENU_OPTIONS: tuple[tuple[str, str, str], ...] = (
+    ("L", "Download missing", "missing"),
+    ("K", "Download by category", "category"),
+    ("I", "Download by item", "item"),
+    ("D", "Delete DB + local file", "delete"),
+    ("X", "Delete DB only", "db-only"),
+    ("S", "Sync metadata", "sync"),
+    ("B", "Back", "back/q"),
+)
+MEDIA_ACTION_ALIASES: dict[str, str] = {
+    "l": "download_missing",
+    "missing": "download_missing",
+    "k": "download_category",
+    "cat": "download_category",
+    "category": "download_category",
+    "i": "download_item",
+    "item": "download_item",
+    "items": "download_item",
+    "d": "delete_local",
+    "delete": "delete_local",
+    "x": "delete_db",
+    "db": "delete_db",
+    "db-only": "delete_db",
+    "s": "sync",
+    "sync": "sync",
+    "meta": "sync",
+    "metadata": "sync",
+    "b": "back",
+    "q": "back",
+    "back": "back",
+}
+
 MEDIA_CATEGORY_ORDER: tuple[tuple[str, str, str], ...] = (
     ("image", "🖼️", "P"),
     ("video", "🎬", "V"),
     ("archive", "📦", "A"),
     ("other", "❓", "O"),
 )
+
+
+def _print_action_menu(title: str, options: Sequence[tuple[str, str, str]]) -> None:
+    """Print compact, line-by-line action menu."""
+    print(f"\n[?] {title}:")
+    for key, label, alias in options:
+        print(f"  [{key}] {label}  ({alias})")
+
+
+def _resolve_menu_action(raw: str, aliases: dict[str, str], default: str = "") -> str:
+    """Normalize user menu input to canonical action key."""
+    token = raw.strip().lower()
+    if not token:
+        return default
+    return aliases.get(token, "")
 
 
 def _group_media_items(
@@ -827,7 +898,8 @@ def _print_media_grouped(
                 f"    [{alias}/{item.id}] {item.display_name}\n"
                 f"         {size}  {remote}  {local}"
             )
-    print("\n  ID format: alias (e.g. V1) atau DB ID (e.g. 123)")
+    print("\n  Legend: remote 🟢 active / ⚪ removed, local 💾 downloaded / ☁️ missing")
+    print("  ID format: alias (e.g. V1) or DB ID (e.g. 123)")
     return groups, alias_map
 
 
@@ -840,9 +912,12 @@ async def _manage_album_media() -> None:
             return
 
         _print_managed_albums(albums)
-        raw_id = _safe_input("[?] Managed album ID to view media: ").strip()
+        print("\n[*] Choose one album from the list above to open media manager.")
+        raw_id = _safe_input("[?] Album ID (or B to go back): ").strip()
+        if raw_id.lower() in {"", "b", "back", "q"}:
+            return
         if not raw_id.isdigit():
-            print("[!] Invalid ID.")
+            print("[!] Invalid album ID. Enter a numeric ID from the list.")
             return
 
         album = get_managed_album(int(raw_id))
@@ -866,18 +941,17 @@ async def _manage_album_media() -> None:
                         album.album_url, include_removed=True
                     )
                     groups, alias_map = _print_media_grouped(album, items)
-                    action = (
+                    _print_action_menu("Media actions", MEDIA_MENU_OPTIONS)
+                    action = _resolve_menu_action(
                         _safe_input(
-                            "\n[?] Media menu: [L/1] Download missing  [K/2] Download by category  "
-                            "[I/3] Download by item  [D/4] Delete DB+file  [X/5] Delete DB only  "
-                            "[S/6]ync metadata  [B]ack: "
-                        )
-                        .strip()
-                        .lower()
+                            "[?] Choose media action [L/K/I/D/X/S/B] (Enter=B): "
+                        ),
+                        MEDIA_ACTION_ALIASES,
+                        default="back",
                     )
-                    if action in {"", "b", "back", "q"}:
+                    if action == "back":
                         return
-                    if action in {"s", "sync", "meta", "metadata", "6"}:
+                    if action == "sync":
                         folder = await create_download_folder(album.target_folder)
                         sync_errors = await sync_album_only(
                             session,
@@ -892,13 +966,38 @@ async def _manage_album_media() -> None:
                             print("[*] Sync-only completed (no file downloads).")
                         _pause_before_refresh()
                         continue
-                    if action in {"l", "1", "missing"}:
+                    if action == "download_missing":
                         await _download_selected_media(album, items, "missing only")
                         _pause_before_refresh()
                         continue
-                    if action in {"k", "2", "cat", "category"}:
+                    if action == "download_category":
+                        available_rows: list[tuple[str, str, str, int]] = []
+                        for category, emoji, prefix in MEDIA_CATEGORY_ORDER:
+                            bucket = groups.get(category, [])
+                            if not bucket:
+                                continue
+                            available_rows.append(
+                                (prefix.lower(), category, emoji, len(bucket))
+                            )
+
+                        if not available_rows:
+                            print("[!] No category available in current media list.")
+                            _pause_before_refresh()
+                            continue
+
+                        total_available = sum(
+                            count for _, _, _, count in available_rows
+                        )
+                        print("[*] Available categories:")
+                        for shortcut, category, emoji, count in available_rows:
+                            print(f"    [{shortcut}] {emoji} {category} ({count})")
+                        print(f"    [all] all categories ({total_available})")
+
+                        shortcuts_hint = ",".join(
+                            shortcut for shortcut, _, _, _ in available_rows
+                        )
                         raw_category = _safe_input(
-                            "[?] Category (all / p,v,a,o or comma-separated): "
+                            f"[?] Select category(s) [all / {shortcuts_hint}]: "
                         ).strip()
                         categories = _parse_media_category_selection(
                             raw_category, groups
@@ -915,9 +1014,9 @@ async def _manage_album_media() -> None:
                         )
                         _pause_before_refresh()
                         continue
-                    if action in {"i", "3", "item", "items"}:
+                    if action == "download_item":
                         raw_media_ids = _safe_input(
-                            "[?] Media ID/alias(s), comma-separated (e.g. V1,123,V1-V3,all): "
+                            "[?] Select media ID/alias(s) (e.g. V1,123,V1-V3,all): "
                         ).strip()
                         media_ids = _parse_media_item_selection(
                             raw_media_ids, alias_map
@@ -935,14 +1034,16 @@ async def _manage_album_media() -> None:
                         )
                         _pause_before_refresh()
                         continue
-                    if action not in {"d", "delete", "4", "x", "db", "db-only", "5"}:
+                    if action not in {"delete_local", "delete_db"}:
                         print("[!] Unknown media action.")
                         _pause_before_refresh()
                         continue
 
-                    delete_local = action in {"d", "delete", "4"}
+                    delete_local = action == "delete_local"
+                    delete_scope = "DB + local file" if delete_local else "DB only"
                     raw_media_ids = _safe_input(
-                        "[?] Media ID/alias(s), comma-separated: "
+                        f"[?] Select media ID/alias(s) to delete ({delete_scope}), "
+                        "comma-separated: "
                     ).strip()
                     media_ids = _parse_media_item_selection(raw_media_ids, alias_map)
                     if not media_ids:
@@ -1187,6 +1288,7 @@ async def _managed_sync_metadata() -> None:
             return
 
         _print_managed_albums(albums)
+        print("[*] Selection: 'all' or comma-separated IDs (example: 1,2)")
         selected_raw = _safe_input(
             "[?] Select album ID(s) to sync metadata (e.g. 1,2) or 'all': "
         ).strip()
@@ -1230,31 +1332,30 @@ async def _managed_album_menu() -> None:
                 _clear_screen()
                 albums = list_managed_albums(enabled_only=False)
                 _print_managed_albums(albums)
-                action = (
-                    _safe_input(
-                        "\n[?] Managed menu: [A/1]dd  [M/2]edia  [S/3]ync metadata  [T/4]oggle remove policy  [R/5]emove  [B]ack: "
-                    )
-                    .strip()
-                    .lower()
+                _print_action_menu("Managed actions", MANAGED_MENU_OPTIONS)
+                action = _resolve_menu_action(
+                    _safe_input("[?] Choose managed action [A/M/S/T/R/B] (Enter=B): "),
+                    MANAGED_ACTION_ALIASES,
+                    default="back",
                 )
-                if action in {"", "b", "back", "q"}:
+                if action == "back":
                     return
-                if action in {"a", "add", "1"}:
+                if action == "add":
                     await _managed_add_album(session)
                     _pause_before_refresh()
                     continue
-                if action in {"m", "media", "2"}:
+                if action == "media":
                     await _manage_album_media()
                     continue
-                if action in {"s", "sync", "3"}:
+                if action == "sync":
                     await _managed_sync_metadata()
                     _pause_before_refresh()
                     continue
-                if action in {"t", "toggle", "4"}:
+                if action == "toggle":
                     _managed_toggle_remove_policy()
                     _pause_before_refresh()
                     continue
-                if action in {"r", "remove", "5"}:
+                if action == "remove":
                     _managed_remove_album()
                     _pause_before_refresh()
                     continue
@@ -1277,6 +1378,7 @@ async def _sync_managed_albums_flow() -> None:
             return
 
         _print_managed_albums(albums)
+        print("[*] Selection: 'all' or comma-separated IDs (example: 1,2)")
         selected_raw = _safe_input(
             "[?] Select album ID(s) to sync (e.g. 1,2) or 'all': "
         ).strip()
