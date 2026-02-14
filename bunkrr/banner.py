@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Sequence
 
-ICON_SVG_PATH = Path(__file__).resolve().parent.parent / "icon.svg"
+VERSION_PATH = Path(__file__).resolve().parent.parent / "VERSION"
 
 _ICON_ASCII = (
     "        +++++++++++++++++++",
@@ -54,13 +55,33 @@ def _pad_lines(lines: tuple[str, ...], target_height: int, centered: bool) -> li
     return out
 
 
+def _read_cli_version() -> str:
+    """
+    Read CLI version from VERSION file.
+
+    If version ends with `-HASH`, replace HASH with first 7 chars of md5(VERSION bytes).
+    """
+    try:
+        raw_bytes = VERSION_PATH.read_bytes()
+        raw_text = raw_bytes.decode("utf-8", errors="replace").strip()
+    except OSError:
+        return "unknown"
+
+    if not raw_text:
+        return "unknown"
+
+    if raw_text.endswith("-HASH"):
+        digest7 = hashlib.md5(raw_bytes).hexdigest()[:7]  # nosec B324
+        return f"{raw_text[:-4]}{digest7}"
+
+    return raw_text
+
+
 def render_banner(
     separator: str = " | ",
     extra_right_lines: Sequence[str] | None = None,
 ) -> str:
     """Render banner as `ascii icon | ascii teks`."""
-    _ = ICON_SVG_PATH.exists()
-
     right_block = list(_BUNKR_ASCII)
     if extra_right_lines:
         right_block.extend(str(line) for line in extra_right_lines)
@@ -80,7 +101,11 @@ def render_banner(
 
 def render_main_menu_banner(separator: str = " | ") -> str:
     """Render banner and use empty right-side area for CLI main menu hints."""
+    version = _read_cli_version()
+    title_width = max(len(line) for line in _BUNKR_ASCII)
+    version_line = version.rjust(title_width)
     menu_lines = (
+        version_line,
         "",
         "Main menu:",
         "[1] Quick download",
