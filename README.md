@@ -9,6 +9,10 @@ Yet another CLI downloader for Bunkr albums with local metadata store, managed a
 - Sync metadata only (without downloading files)
 - Sync managed albums with download
 - Media management per album (grouped by category: image, video, archive, other)
+- Media download actions from managed media view:
+  - download missing items
+  - download by category
+  - download by selected item(s)
 - Per-album remove policy when remote media disappears:
   - `retain` local file (default)
   - `delete` local file
@@ -55,12 +59,21 @@ You can also paste album URL or URL-file path directly at the main prompt.
 
 From `Manage albums`, available actions:
 
-- `[A/1] Add`
-- `[M/2] Media`
-- `[S/3] Sync metadata`
-- `[T/4] Toggle remove policy`
-- `[R/5] Remove`
+- `[A] Add`
+- `[M] Media`
+- `[S] Sync metadata`
+- `[T] Toggle remove policy`
+- `[R] Remove`
 - `[B] Back`
+
+Action input supports both shortcut and keyword, for example:
+
+- `A` or `add`
+- `M` or `media`
+- `S` or `sync`
+- `T` or `toggle`
+- `R` or `remove`
+- `B`, `back`, or `q`
 
 ### Add flow
 
@@ -76,9 +89,23 @@ When adding an album:
 
 Media view is grouped by category and supports:
 
+- `L`: download missing media items
+- `K`: download by category (`image`, `video`, `archive`, `other`)
+  - available categories are shown dynamically with media counts
+- `I`: download by selected media item(s)
+  - supports alias and DB ID selection
+  - example inputs: `V1`, `123`, `V1-V3`, `all`
 - `D`: delete DB row and local file
 - `X`: delete DB row only
 - `S`: sync metadata for selected managed album
+- `B`: back
+
+Media item display format:
+
+- Alias + DB ID, example: `[V1/123]`
+- Legend:
+  - remote `🟢` active / `⚪` removed
+  - local `💾` downloaded / `☁️` missing
 
 ## Data Store
 
