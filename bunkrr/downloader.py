@@ -538,27 +538,18 @@ def _parse_album_selection(
     return selected
 
 
-def _parse_numeric_ids(raw: str) -> list[int]:
-    """Parse comma-separated positive integer IDs."""
-    ids: list[int] = []
-    seen: set[int] = set()
-    for chunk in raw.split(","):
-        token = chunk.strip()
-        if not token or not token.isdigit():
-            continue
-        value = int(token)
-        if value > 0 and value not in seen:
-            seen.add(value)
-            ids.append(value)
-    return ids
+MEDIA_CATEGORY_ORDER: tuple[tuple[str, str, str], ...] = (
+    ("image", "🖼️", "P"),
+    ("video", "🎬", "V"),
+    ("archive", "📦", "A"),
+    ("other", "❓", "O"),
+)
 
 
-def _print_media_grouped(album: ManagedAlbum, items: Sequence[AlbumMediaItem]) -> None:
-    """Print one managed album media list grouped by category."""
-    if not items:
-        print(f"[*] No media items in DB for '{album.album_label}'.")
-        return
-
+def _group_media_items(
+    items: Sequence[AlbumMediaItem],
+) -> dict[str, list[AlbumMediaItem]]:
+    """Group media rows by normalized category."""
     groups: dict[str, list[AlbumMediaItem]] = {
         "image": [],
         "video": [],
@@ -567,27 +558,277 @@ def _print_media_grouped(album: ManagedAlbum, items: Sequence[AlbumMediaItem]) -
     }
     for item in items:
         groups.get(item.category, groups["other"]).append(item)
+    return groups
+
+
+def _parse_media_item_selection(raw: str, alias_map: dict[str, int]) -> list[int]:
+    """Parse item selection from numeric IDs, aliases (e.g. V1), or ranges."""
+    if not raw.strip():
+        return []
+
+    selected: list[int] = []
+    seen: set[int] = set()
+
+    def add_token(token: str) -> None:
+        media_id = alias_map.get(token.lower())
+        if media_id and media_id not in seen:
+            seen.add(media_id)
+            selected.append(media_id)
+
+    all_ids = sorted(set(alias_map.values()))
+    for chunk in raw.split(","):
+        token = chunk.strip().lower()
+        if not token:
+            continue
+        if token in {"all", "*"}:
+            for media_id in all_ids:
+                if media_id not in seen:
+                    seen.add(media_id)
+                    selected.append(media_id)
+            continue
+
+        add_token(token)
+        if token in alias_map:
+            continue
+
+        match_alias = re.fullmatch(r"([pvao])(\d+)-([pvao])(\d+)", token)
+        if match_alias and match_alias.group(1) == match_alias.group(3):
+            prefix = match_alias.group(1)
+            start = int(match_alias.group(2))
+            end = int(match_alias.group(4))
+            if start > end:
+                start, end = end, start
+            for index in range(start, end + 1):
+                add_token(f"{prefix}{index}")
+            continue
+
+        match_num = re.fullmatch(r"(\d+)-(\d+)", token)
+        if match_num:
+            start = int(match_num.group(1))
+            end = int(match_num.group(2))
+            if start > end:
+                start, end = end, start
+            for value in range(start, end + 1):
+                add_token(str(value))
+
+    return selected
+
+
+def _parse_media_category_selection(
+    raw: str, groups: dict[str, list[AlbumMediaItem]]
+) -> list[str]:
+    """Parse category selection tokens for media download actions."""
+    if not raw.strip():
+        return []
+
+    available = {
+        category for category, _, _ in MEDIA_CATEGORY_ORDER if groups[category]
+    }
+    if not available:
+        return []
+
+    token_map: dict[str, str] = {
+        "p": "image",
+        "photo": "image",
+        "photos": "image",
+        "image": "image",
+        "images": "image",
+        "1": "image",
+        "v": "video",
+        "video": "video",
+        "videos": "video",
+        "2": "video",
+        "a": "archive",
+        "archive": "archive",
+        "archives": "archive",
+        "zip": "archive",
+        "z": "archive",
+        "3": "archive",
+        "o": "other",
+        "other": "other",
+        "others": "other",
+        "?": "other",
+        "4": "other",
+    }
+
+    raw_lower = raw.strip().lower()
+    if raw_lower in {"all", "*"}:
+        return [
+            category for category, _, _ in MEDIA_CATEGORY_ORDER if category in available
+        ]
+
+    selected: list[str] = []
+    seen: set[str] = set()
+    for chunk in raw_lower.split(","):
+        token = chunk.strip()
+        if not token:
+            continue
+        category = token_map.get(token)
+        if not category or category not in available or category in seen:
+            continue
+        seen.add(category)
+        selected.append(category)
+    return selected
+
+
+def _pick_downloadable_media_url(item: AlbumMediaItem) -> tuple[str, str] | None:
+    """Return primary and fallback URL tuple for one media item when available."""
+    direct = item.direct_url.strip()
+    fallback = item.fallback_url.strip()
+    if direct:
+        return direct, fallback
+    if fallback:
+        return fallback, fallback
+    return None
+
+
+def _summarize_media_rows(
+    items: Sequence[AlbumMediaItem],
+) -> tuple[dict[str, int], int]:
+    """Summarize item counts by category and total size."""
+    counts = {"image": 0, "video": 0, "archive": 0, "other": 0}
+    total_size = 0
+    for item in items:
+        bucket = item.category if item.category in counts else "other"
+        counts[bucket] += 1
+        if item.size_bytes and item.size_bytes > 0:
+            total_size += item.size_bytes
+    return counts, total_size
+
+
+def _build_media_download_jobs(
+    items: Sequence[AlbumMediaItem],
+) -> tuple[list[tuple[str, str, str, str]], list[str], int, int]:
+    """
+    Build download tuples from media rows.
+
+    Returns:
+        jobs, warnings, skipped_downloaded, skipped_inactive
+    """
+    jobs: list[tuple[str, str, str, str]] = []
+    warnings: list[str] = []
+    seen: set[str] = set()
+    skipped_downloaded = 0
+    skipped_inactive = 0
+
+    for item in items:
+        if not item.is_active:
+            skipped_inactive += 1
+            continue
+        if item.is_downloaded:
+            skipped_downloaded += 1
+            continue
+
+        picked = _pick_downloadable_media_url(item)
+        if not picked:
+            warnings.append(
+                f"\n[!] No media URL for [{item.id}] {item.display_name}; skipped."
+            )
+            continue
+
+        url, fallback_url = picked
+        key = f"{url}|{item.display_name}"
+        if key in seen:
+            continue
+        seen.add(key)
+        jobs.append(
+            (
+                url,
+                item.display_name,
+                item.referer_url.strip(),
+                fallback_url,
+            )
+        )
+
+    return jobs, warnings, skipped_downloaded, skipped_inactive
+
+
+async def _download_selected_media(
+    album: ManagedAlbum,
+    selected_items: Sequence[AlbumMediaItem],
+    label: str,
+) -> None:
+    """Download selected media rows into managed album folder."""
+    if not selected_items:
+        print("[!] No media selected.")
+        return
+
+    jobs, pre_errors, skipped_downloaded, skipped_inactive = _build_media_download_jobs(
+        selected_items
+    )
+    if skipped_downloaded:
+        print(f"[*] Skipped already-downloaded item(s): {skipped_downloaded}")
+    if skipped_inactive:
+        print(f"[*] Skipped inactive/removed item(s): {skipped_inactive}")
+
+    if not jobs:
+        print("[!] No pending media item to download.")
+        for msg in pre_errors:
+            print(msg)
+        return
+
+    pending_items = [
+        item for item in selected_items if item.is_active and not item.is_downloaded
+    ]
+    counts, total_size = _summarize_media_rows(pending_items)
+    print(
+        f"[*] Download media ({label}): {len(jobs)} item(s) "
+        f"(image {counts['image']}, video {counts['video']}, "
+        f"archive {counts['archive']}, other {counts['other']}) "
+        f"~{_format_size(total_size)}"
+    )
+    effective_conc = min(MAX_CONCURRENT_DOWNLOADS, len(jobs))
+    print(
+        f"[*] Concurrency: using {effective_conc} workers "
+        f"(max {MAX_CONCURRENT_DOWNLOADS}, set via BUNKR_CONCURRENCY)"
+    )
+
+    folder = await create_download_folder(album.target_folder)
+    downloaded, failed, errors = await download_images_from_urls(jobs, folder)
+    _print_run_summary(len(downloaded), len(failed), [*pre_errors, *errors])
+
+    if ENABLE_SYNC_DB:
+        try:
+            state = refresh_album_download_state(album.album_url, folder)
+            print(
+                f"[*] Local state: downloaded {state.downloaded_items}/{state.total_items}, "
+                f"missing {state.missing_items}"
+            )
+        except Exception as error:  # pragma: no cover - should not block menu flow
+            print(f"[!] Refresh local state failed: {error}")
+
+
+def _print_media_grouped(
+    album: ManagedAlbum,
+    items: Sequence[AlbumMediaItem],
+) -> tuple[dict[str, list[AlbumMediaItem]], dict[str, int]]:
+    """Print one managed album media list grouped by category and return alias map."""
+    groups = _group_media_items(items)
+    if not items:
+        print(f"[*] No media items in DB for '{album.album_label}'.")
+        return groups, {}
+
+    alias_map: dict[str, int] = {}
 
     print(f"\n[*] Media in [{album.id}] {album.album_label}")
-    order = [
-        ("image", "🖼️"),
-        ("video", "🎬"),
-        ("archive", "📦"),
-        ("other", "❓"),
-    ]
-    for category, emoji in order:
+    for category, emoji, prefix in MEDIA_CATEGORY_ORDER:
         bucket = groups[category]
         if not bucket:
             continue
         print(f"\n  {emoji} ({len(bucket)})")
-        for item in bucket:
+        for idx, item in enumerate(bucket, start=1):
+            alias = f"{prefix}{idx}"
+            alias_map[alias.lower()] = item.id
+            alias_map[str(item.id)] = item.id
             size = _format_size(item.size_bytes) if item.size_bytes else "?"
             remote = "🟢" if item.is_active else "⚪"
             local = "💾" if item.is_downloaded else "☁️"
             print(
-                f"    [{item.id}] {item.display_name}\n"
+                f"    [{alias}/{item.id}] {item.display_name}\n"
                 f"         {size}  {remote}  {local}"
             )
+    print("\n  ID format: alias (e.g. V1) atau DB ID (e.g. 123)")
+    return groups, alias_map
 
 
 async def _manage_album_media() -> None:
@@ -613,20 +854,30 @@ async def _manage_album_media() -> None:
             while True:
                 try:
                     _clear_screen()
+                    if ENABLE_SYNC_DB:
+                        try:
+                            refresh_album_download_state(
+                                album.album_url, album.target_folder
+                            )
+                        except Exception:
+                            # Keep menu usable even when folder scan fails.
+                            pass
                     items = list_album_media_items(
                         album.album_url, include_removed=True
                     )
-                    _print_media_grouped(album, items)
+                    groups, alias_map = _print_media_grouped(album, items)
                     action = (
                         _safe_input(
-                            "\n[?] Media menu: [D]elete DB+file  [X] Delete DB only  [S]ync metadata  [B]ack: "
+                            "\n[?] Media menu: [L/1] Download missing  [K/2] Download by category  "
+                            "[I/3] Download by item  [D/4] Delete DB+file  [X/5] Delete DB only  "
+                            "[S/6]ync metadata  [B]ack: "
                         )
                         .strip()
                         .lower()
                     )
                     if action in {"", "b", "back", "q"}:
                         return
-                    if action in {"s", "sync", "meta", "metadata"}:
+                    if action in {"s", "sync", "meta", "metadata", "6"}:
                         folder = await create_download_folder(album.target_folder)
                         sync_errors = await sync_album_only(
                             session,
@@ -641,16 +892,59 @@ async def _manage_album_media() -> None:
                             print("[*] Sync-only completed (no file downloads).")
                         _pause_before_refresh()
                         continue
-                    if action not in {"d", "delete", "x", "db", "db-only"}:
+                    if action in {"l", "1", "missing"}:
+                        await _download_selected_media(album, items, "missing only")
+                        _pause_before_refresh()
+                        continue
+                    if action in {"k", "2", "cat", "category"}:
+                        raw_category = _safe_input(
+                            "[?] Category (all / p,v,a,o or comma-separated): "
+                        ).strip()
+                        categories = _parse_media_category_selection(
+                            raw_category, groups
+                        )
+                        if not categories:
+                            print("[!] No valid category selected.")
+                            _pause_before_refresh()
+                            continue
+                        selected: list[AlbumMediaItem] = []
+                        for category in categories:
+                            selected.extend(groups.get(category, []))
+                        await _download_selected_media(
+                            album, selected, ",".join(categories)
+                        )
+                        _pause_before_refresh()
+                        continue
+                    if action in {"i", "3", "item", "items"}:
+                        raw_media_ids = _safe_input(
+                            "[?] Media ID/alias(s), comma-separated (e.g. V1,123,V1-V3,all): "
+                        ).strip()
+                        media_ids = _parse_media_item_selection(
+                            raw_media_ids, alias_map
+                        )
+                        if not media_ids:
+                            print("[!] No valid media ID selected.")
+                            _pause_before_refresh()
+                            continue
+                        by_id = {item.id: item for item in items}
+                        selected = [
+                            by_id[item_id] for item_id in media_ids if item_id in by_id
+                        ]
+                        await _download_selected_media(
+                            album, selected, "item selection"
+                        )
+                        _pause_before_refresh()
+                        continue
+                    if action not in {"d", "delete", "4", "x", "db", "db-only", "5"}:
                         print("[!] Unknown media action.")
                         _pause_before_refresh()
                         continue
 
-                    delete_local = action in {"d", "delete"}
+                    delete_local = action in {"d", "delete", "4"}
                     raw_media_ids = _safe_input(
-                        "[?] Media ID(s), comma-separated: "
+                        "[?] Media ID/alias(s), comma-separated: "
                     ).strip()
-                    media_ids = _parse_numeric_ids(raw_media_ids)
+                    media_ids = _parse_media_item_selection(raw_media_ids, alias_map)
                     if not media_ids:
                         print("[!] No valid media ID selected.")
                         _pause_before_refresh()

@@ -54,6 +54,9 @@ class AlbumMediaItem:
     is_downloaded: bool
     downloaded_path: str
     removed_at: str | None
+    direct_url: str = ""
+    fallback_url: str = ""
+    referer_url: str = ""
 
 
 @dataclass(frozen=True)

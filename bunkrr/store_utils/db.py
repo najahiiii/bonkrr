@@ -159,6 +159,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn,
         "album_items",
         {
+            "direct_url": "TEXT",
+            "fallback_url": "TEXT",
+            "referer_url": "TEXT",
             "is_downloaded": "INTEGER NOT NULL DEFAULT 0",
             "downloaded_path": "TEXT",
             "downloaded_at": "TEXT",
@@ -347,4 +350,7 @@ def _to_album_media_item(row: sqlite3.Row) -> AlbumMediaItem:
         removed_at=(
             _coerce_text(row["removed_at"]) if row["removed_at"] is not None else None
         ),
+        direct_url=_coerce_text(_row_value(row, "direct_url")),
+        fallback_url=_coerce_text(_row_value(row, "fallback_url")),
+        referer_url=_coerce_text(_row_value(row, "referer_url")),
     )

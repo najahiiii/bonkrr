@@ -332,7 +332,8 @@ def list_album_media_items(
         rows = conn.execute(
             f"""
             SELECT id, item_key, suggested_name, original_name, media_type,
-                   size_bytes, is_active, is_downloaded, downloaded_path, removed_at
+                   size_bytes, is_active, is_downloaded, downloaded_path, removed_at,
+                   direct_url, fallback_url, referer_url
             FROM album_items
             WHERE album_id = ?
               {where_removed}
