@@ -59,7 +59,10 @@ def _read_cli_version() -> str:
     """
     Read CLI version from VERSION file.
 
-    If version ends with `-HASH`, replace HASH with first 7 chars of md5(VERSION bytes).
+    Rules:
+    - `v1.1.0` -> rendered as `v1.1.0-<md5[:7]>`
+    - `...HASH` placeholder -> replace HASH with md5[:7]
+    - already-suffixed values (e.g. `v1.1.0-abc1234`) are returned as-is
     """
     try:
         raw_bytes = VERSION_PATH.read_bytes()
@@ -70,11 +73,18 @@ def _read_cli_version() -> str:
     if not raw_text:
         return "unknown"
 
-    if raw_text.endswith("-HASH"):
-        digest7 = hashlib.md5(raw_bytes).hexdigest()[:7]  # nosec B324
-        return f"{raw_text[:-4]}{digest7}"
+    digest7 = hashlib.md5(raw_bytes).hexdigest()[:7]  # nosec B324
+    normalized = raw_text.replace(" - HASH", "-HASH")
+    if normalized.endswith("-HASH"):
+        return f"{normalized[:-4]}{digest7}"
 
-    return raw_text
+    # If caller already provided a non-placeholder suffix, keep it.
+    if "-" in normalized:
+        tail = normalized.rsplit("-", 1)[-1]
+        if tail and tail.upper() != "HASH":
+            return normalized
+
+    return f"{normalized}-{digest7}"
 
 
 def render_banner(
