@@ -5,6 +5,7 @@
 import asyncio
 import json
 import os
+import random
 import re
 from typing import Mapping, Sequence
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -13,10 +14,17 @@ from aiohttp import ClientResponse, ClientSession, ClientTimeout, client_excepti
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 
-from bunkrr.api import resolve_bunkr_url
+from bunkrr.api import resolve_bunkr_url, resolve_signed_cdn_url
 from bunkrr.utils import dedupe_path, get_filename, get_random_user_agent
 
-MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("BUNKR_CONCURRENCY", "12") or 12)
+MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("BUNKR_CONCURRENCY", "6") or 6)
+
+# HTTP statuses worth retrying with backoff (rate limiting / transient upstream).
+RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+try:
+    MAX_FETCH_RETRIES = int(os.environ.get("BUNKR_MAX_RETRIES", "5") or 5)
+except ValueError:
+    MAX_FETCH_RETRIES = 5
 
 # Debug flag controlled by env var BUNKR_DEBUG
 DEBUG = os.environ.get("BUNKR_DEBUG", "").lower() in {"1", "true", "yes", "on"}
@@ -82,6 +90,14 @@ def _extract_ogname_from_html(html: str) -> str | None:
     if not match:
         return None
     return _fix_mojibake(match.group(1).strip()) or None
+
+
+def _extract_js_cdn_from_html(html: str) -> str | None:
+    """Extract the `jsCDN` media URL from a bunkr file page."""
+    match = re.search(r"""jsCDN\s*=\s*["']([^"']+)["']""", html)
+    if not match:
+        return None
+    return match.group(1).replace("\\/", "/").strip() or None
 
 
 def _media_save_path(
@@ -350,10 +366,14 @@ class BunkrClient:
                 dbg(
                     f"GET {url} -> {initial_resp.status} {initial_resp.headers.get('Content-Type','')}"
                 )
-                if initial_resp.status == 429:
+                if (
+                    initial_resp.status in RETRYABLE_STATUSES
+                    and attempt < MAX_FETCH_RETRIES
+                ):
                     if attempt == 0 or attempt % 3 == 0:
                         tqdm.write(
-                            f"[~] 429 on initial fetch (attempt {attempt + 1}) for {url}"
+                            f"[~] {initial_resp.status} on initial fetch "
+                            f"(attempt {attempt + 1}/{MAX_FETCH_RETRIES}) for {url}"
                         )
                     retry_after = initial_resp.headers.get("Retry-After")
                     delay = (
@@ -361,6 +381,7 @@ class BunkrClient:
                         if retry_after and str(retry_after).isdigit()
                         else 5 * (2**attempt)
                     )
+                    delay += random.uniform(0, 1.5)
                     await initial_resp.release()
                     await asyncio.sleep(delay)
                     attempt += 1
@@ -394,16 +415,32 @@ class BunkrClient:
                     await _stream_response_to_file(initial_resp, file_path, file_size)
                     return True, None
 
-                # HTML response on media page: try API resolver once using file_id
-                # from page markup (data-file-id / get.bunkrr bridge).
+                # HTML response on media page: resolve the real CDN URL.
+                # Preferred: sign the `jsCDN` URL exposed on the file page.
+                # Fallback: legacy get.bunkrr API resolver keyed by numeric file_id.
                 if not _used_api_resolve:
                     try:
                         html_text = await initial_resp.text(errors="ignore")
+                        cdn_url = _extract_js_cdn_from_html(html_text)
+                        resolved_name = (
+                            _extract_ogname_from_html(html_text) or suggested_name
+                        )
+                        if cdn_url:
+                            resolved_url = await resolve_signed_cdn_url(
+                                cdn_url, self.session
+                            )
+                            dbg(f"Resolved signed CDN URL: {resolved_url}")
+                            return await self.download_media(
+                                resolved_url,
+                                path,
+                                suggested_name=resolved_name,
+                                referer=str(initial_resp.url),
+                                fallback_url=None,
+                                _used_fallback=True,
+                                _used_api_resolve=True,
+                            )
                         file_id = _extract_file_id_from_html(html_text)
                         if file_id:
-                            resolved_name = (
-                                _extract_ogname_from_html(html_text) or suggested_name
-                            )
                             resolved_url = await resolve_bunkr_url(
                                 file_id=file_id,
                                 ogname=resolved_name,

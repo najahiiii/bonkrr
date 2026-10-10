@@ -1,11 +1,12 @@
 """API helper to resolve bunkr file ids into final media URLs."""
 
-# pylint: disable=broad-exception-caught
+# pylint: disable=broad-exception-caught,too-many-locals
 
 import asyncio
 import base64
+import random
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from aiohttp import ClientSession, ClientTimeout, client_exceptions
 
@@ -15,6 +16,58 @@ API_URLS = (
     "https://get.bunkrr.su/api/_001_v2",
     "https://apidl.bunkr.ru/api/_001_v2",
 )
+
+SIGN_URL = "https://glb-apisign.cdn.cr/sign"
+
+
+async def resolve_signed_cdn_url(
+    cdn_url: str,
+    session: ClientSession,
+    max_retries: int = 3,
+    backoff_base: float = 1.5,
+) -> str:
+    """
+    Sign a CDN media URL with the current bunkr signing service.
+
+    Returns the CDN URL with `token` and `ex` query parameters appended.
+    """
+    sign_endpoint = f"{SIGN_URL}?path={quote(urlsplit(cdn_url).path, safe='')}"
+    headers = {
+        "Accept": "*/*",
+        "User-Agent": get_random_user_agent(),
+        "Referer": "https://bunkr.cr/",
+    }
+
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            async with session.get(sign_endpoint, headers=headers) as resp:
+                if resp.status in {429, 500, 502, 503, 504}:
+                    retry_after = resp.headers.get("Retry-After")
+                    delay = (
+                        float(retry_after)
+                        if retry_after and str(retry_after).isdigit()
+                        else backoff_base * (2**attempt)
+                    )
+                    await asyncio.sleep(delay + random.uniform(0, 0.75))
+                    continue
+                resp.raise_for_status()
+                data = await resp.json()
+                token = data.get("token")
+                ex = data.get("ex")
+                if not token or ex is None:
+                    raise ValueError(f"Invalid sign response: {data}")
+                return f"{cdn_url}{'&' if '?' in cdn_url else '?'}token={token}&ex={ex}"
+        except (client_exceptions.ClientError, asyncio.TimeoutError) as e:
+            last_exc = e
+            await asyncio.sleep(backoff_base * (2**attempt) + random.uniform(0, 0.75))
+        except Exception as e:
+            last_exc = e
+            break
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Unexpected sign retry loop exit")
 
 
 def _b64_to_bytes(b64_str: str) -> bytes:
