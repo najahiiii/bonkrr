@@ -41,6 +41,23 @@ def dbg(msg: str) -> None:
         print(f"[debug] {msg}")
 
 
+def _fix_mojibake(value: str | None) -> str:
+    """
+    Repair double-encoded UTF-8 text (UTF-8 bytes decoded as Latin-1).
+
+    Some bunkr pages embed filenames whose original UTF-8 bytes were decoded
+    as Latin-1 before being JSON-escaped, producing mojibake. Re-encoding to
+    Latin-1 and decoding as UTF-8 restores the original text. Returns the
+    input unchanged when it is not recoverable.
+    """
+    if not value:
+        return value or ""
+    try:
+        return value.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return value
+
+
 def _extract_file_id_from_html(html: str) -> str | None:
     """Extract numeric bunkr `file_id` from a media HTML page."""
     patterns = (
@@ -64,7 +81,7 @@ def _extract_ogname_from_html(html: str) -> str | None:
     )
     if not match:
         return None
-    return match.group(1).strip() or None
+    return _fix_mojibake(match.group(1).strip()) or None
 
 
 def _media_save_path(
@@ -228,7 +245,9 @@ class BunkrClient:
                         blocks.append(
                             {
                                 "slug": slug,
-                                "original": f.get("original") or f.get("name") or "",
+                                "original": _fix_mojibake(
+                                    f.get("original") or f.get("name") or ""
+                                ),
                                 "origin": origin,
                                 "cdn_endpoint": f.get("cdnEndpoint"),
                                 "cdn_origin": None,
