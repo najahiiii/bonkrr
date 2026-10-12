@@ -115,7 +115,9 @@ Media item display format:
 
 ## Environment Variables
 
-- `BUNKR_CONCURRENCY` (default `12`): max parallel downloads
+- `BUNKR_CONCURRENCY` (default `6`): max parallel downloads
+- `BUNKR_REQUEST_INTERVAL` (default `0.25`): minimum seconds between request starts; spaces out requests to avoid CDN 503 rate limits
+- `BUNKR_MAX_RETRIES` (default `5`): retry attempts for `429`/`5xx` responses
 - `BUNKR_DEBUG`: debug resolver/download logging
 - `BUNKR_LIMIT`: process only first N items (debug/testing)
 - `BUNKR_SYNC_DB` (default enabled): enable metadata DB sync

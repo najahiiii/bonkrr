@@ -10,7 +10,7 @@ from urllib.parse import quote, urlsplit
 
 from aiohttp import ClientSession, ClientTimeout, client_exceptions
 
-from bunkrr.utils import get_random_user_agent
+from bunkrr.utils import REQUEST_PACER, get_random_user_agent
 
 API_URLS = (
     "https://get.bunkrr.su/api/_001_v2",
@@ -41,6 +41,7 @@ async def resolve_signed_cdn_url(
     last_exc: Exception | None = None
     for attempt in range(max_retries):
         try:
+            await REQUEST_PACER.wait()
             async with session.get(sign_endpoint, headers=headers) as resp:
                 if resp.status in {429, 500, 502, 503, 504}:
                     retry_after = resp.headers.get("Retry-After")

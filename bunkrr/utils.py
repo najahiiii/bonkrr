@@ -2,15 +2,56 @@
 
 # pylint: disable=broad-exception-caught
 
+import asyncio
 import os
 import re
 import sys
+import time
 import urllib.parse
 from typing import Mapping, Optional
 
 from fake_useragent import UserAgent
 
 DEFAULT_PARENT_FOLDER = "downloads"
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float environment variable, falling back to `default` on error."""
+    try:
+        return float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+class RatePacer:
+    """
+    Space out request starts so they happen at most once per `min_interval`.
+
+    A shared instance serializes scheduling across all concurrent workers,
+    preventing bursts that trip per-IP rate limits on the remote host.
+    """
+
+    def __init__(self, min_interval: float = 0.0) -> None:
+        self.min_interval = max(0.0, min_interval)
+        self._lock = asyncio.Lock()
+        self._next_allowed = 0.0
+
+    async def wait(self) -> None:
+        """Block until the next scheduled request slot is available."""
+        if self.min_interval <= 0:
+            return
+        async with self._lock:
+            now = time.monotonic()
+            slot = max(now, self._next_allowed)
+            self._next_allowed = slot + self.min_interval
+        delay = slot - now
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+
+# Minimum seconds between outbound request starts (set BUNKR_REQUEST_INTERVAL to tune).
+REQUEST_INTERVAL = _env_float("BUNKR_REQUEST_INTERVAL", 0.25)
+REQUEST_PACER = RatePacer(REQUEST_INTERVAL)
 
 
 def get_random_user_agent() -> str:

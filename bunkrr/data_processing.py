@@ -15,7 +15,12 @@ from bs4 import BeautifulSoup
 from tqdm import tqdm
 
 from bunkrr.api import resolve_bunkr_url, resolve_signed_cdn_url
-from bunkrr.utils import dedupe_path, get_filename, get_random_user_agent
+from bunkrr.utils import (
+    REQUEST_PACER,
+    dedupe_path,
+    get_filename,
+    get_random_user_agent,
+)
 
 MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("BUNKR_CONCURRENCY", "6") or 6)
 
@@ -360,6 +365,7 @@ class BunkrClient:
             initial_resp = None
             attempt = 0
             while True:
+                await REQUEST_PACER.wait()
                 initial_resp = await self.session.get(
                     url, headers=headers, allow_redirects=True
                 )
