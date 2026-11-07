@@ -31,6 +31,9 @@ try:
 except ValueError:
     MAX_FETCH_RETRIES = 5
 
+# Maximum download attempts per file before giving up and writing to failed-links log.
+MAX_DOWNLOAD_ATTEMPTS = 10
+
 # Debug flag controlled by env var BUNKR_DEBUG
 DEBUG = os.environ.get("BUNKR_DEBUG", "").lower() in {"1", "true", "yes", "on"}
 LIMIT = 0
@@ -121,20 +124,35 @@ def _media_save_path(
 async def _stream_response_to_file(
     response: ClientResponse, file_path: str, file_size: int
 ) -> None:
-    """Stream response content to disk with a progress bar."""
+    """Stream response content to disk with a progress bar.
+
+    If the stream is interrupted for any reason the incomplete file is
+    removed so that a subsequent retry always starts from a clean slate
+    (and dedupe_path does not keep appending ' (N)' suffixes).
+    """
     dbg(f"Saving to '{file_path}' size={file_size if file_size else 'unknown'}")
-    with open(file_path, "wb") as file, tqdm(
-        desc=os.path.basename(file_path),
-        total=file_size,
-        unit="B",
-        unit_scale=True,
-        unit_divisor=1024,
-        leave=False,
-        position=1,
-    ) as progress_bar:
-        while chunk := await response.content.read(1024):
-            file.write(chunk)
-            progress_bar.update(len(chunk))
+    try:
+        with open(file_path, "wb") as file, tqdm(
+            desc=os.path.basename(file_path),
+            total=file_size,
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
+            leave=False,
+            position=1,
+        ) as progress_bar:
+            while chunk := await response.content.read(1024):
+                file.write(chunk)
+                progress_bar.update(len(chunk))
+    except BaseException:
+        # Remove the partial file so the next retry starts clean.
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                dbg(f"Removed partial file: '{file_path}'")
+        except OSError:
+            pass
+        raise
 
 
 async def fetch_data(
@@ -142,6 +160,35 @@ async def fetch_data(
 ) -> str | list | None:
     """Wrapper: instantiate a BunkrClient to fetch album name or media blocks."""
     return await BunkrClient(session).fetch_data(base_url, data_type)
+
+
+def _write_failed_links_log(
+    album_folder: str, failed_items: list[tuple[str, str, str]]
+) -> None:
+    """Write a text file listing URLs that failed after all retry attempts."""
+    import datetime
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(album_folder, f"failed_downloads_{timestamp}.txt")
+    lines = [
+        "Failed Downloads -- " + datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Total failed: " + str(len(failed_items)),
+        "=" * 60,
+        "",
+    ]
+    for idx, (url, name, reason) in enumerate(failed_items, start=1):
+        lines.append(f"[{idx}] Video name : {name or '(unknown)'}")
+        lines.append(f"     URL       : {url}")
+        lines.append(f"     Reason    : {reason}")
+        lines.append("")
+    try:
+        with open(log_path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines))
+        tqdm.write(
+            f"\n[!] {len(failed_items)} file(s) failed after all retries. Log: {log_path}"
+        )
+    except OSError as exc:
+        tqdm.write(f"\n[!] Could not write failed-downloads log: {exc}")
 
 
 class BunkrClient:
@@ -353,15 +400,53 @@ class BunkrClient:
         """
         file_path = None
         try:
-            headers = {
-                "User-Agent": get_random_user_agent(),
-                "Referer": referer or "https://bunkr.ac/",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.7",
-                "Connection": "keep-alive",
-            }
+            # Detect whether this is a direct CDN hit (media file) or a bunkr
+            # page request, and pick the right header set accordingly.
+            _is_cdn = bool(re.search(r"\.cdn\.cr|cdn\d*\.", url))
+            _effective_referer = referer or ("https://bunkr.cr/" if _is_cdn else "https://bunkr.ac/")
+            if _is_cdn:
+                headers = {
+                    "User-Agent": get_random_user_agent(),
+                    "Referer": _effective_referer,
+                    "Accept": "*/*",
+                    "Accept-Encoding": "identity",
+                    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+                    "Connection": "keep-alive",
+                    "Range": "bytes=0-",
+                    "Sec-Fetch-Dest": "video",
+                    "Sec-Fetch-Mode": "no-cors",
+                    "Sec-Fetch-Site": "cross-site",
+                    "Sec-Fetch-Storage-Access": "active",
+                    "Sec-CH-UA": '"Not:A-Brand";v="8", "Chromium";v="156", "Google Chrome";v="156"',
+                    "Sec-CH-UA-Mobile": "?0",
+                    "Sec-CH-UA-Platform": '"Windows"',
+                }
+            else:
+                headers = {
+                    "User-Agent": get_random_user_agent(),
+                    "Referer": _effective_referer,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.7",
+                    "Connection": "keep-alive",
+                }
 
             dbg(f"Start download: suggested='{suggested_name}', url='{url}'")
+
+            # Auto-sign direct CDN URLs that carry ?n= but no token/ex.
+            # Such URLs are returned by the legacy API resolver and by album
+            # JSON when no signed CDN origin is available; they 403 without
+            # a valid token + expiry added by the signing service.
+            _needs_sign = (
+                re.search(r"\.cdn\.cr|cdn\d*\.", url)
+                and "token=" not in url
+                and "ex=" not in url
+            )
+            if _needs_sign:
+                try:
+                    url = await resolve_signed_cdn_url(url, self.session)
+                    dbg(f"Auto-signed CDN URL: {url}")
+                except Exception as _sign_exc:
+                    dbg(f"Auto-sign failed (will try unsigned): {_sign_exc}")
             initial_resp = None
             attempt = 0
             while True:
@@ -455,6 +540,20 @@ class BunkrClient:
                             dbg(
                                 f"Resolved via API: file_id={file_id} -> {resolved_url}"
                             )
+                            # Sign the API-resolved URL if it looks like an
+                            # unsigned CDN URL (has no token/ex yet).
+                            if (
+                                re.search(r"\.cdn\.cr|cdn\d*\.", resolved_url)
+                                and "token=" not in resolved_url
+                                and "ex=" not in resolved_url
+                            ):
+                                try:
+                                    resolved_url = await resolve_signed_cdn_url(
+                                        resolved_url, self.session
+                                    )
+                                    dbg(f"Signed API-resolved URL: {resolved_url}")
+                                except Exception as _se:
+                                    dbg(f"Signing API-resolved URL failed: {_se}")
                             return await self.download_media(
                                 resolved_url,
                                 path,
@@ -487,6 +586,15 @@ class BunkrClient:
                 )
 
         except (asyncio.TimeoutError, client_exceptions.ServerTimeoutError) as e:
+            # _stream_response_to_file already removes the partial file, but
+            # guard here too in case the timeout fires before streaming begins.
+            if file_path:
+                try:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                        dbg(f"Removed partial file after timeout: '{file_path}'")
+                except OSError:
+                    pass
             target = file_path if file_path else (suggested_name or url)
             return False, f"\n[!] Timeout downloading '{target}': {e}"
 
@@ -546,7 +654,7 @@ class BunkrClient:
 
         async def download_media_wrapper(
             item: str | Sequence[str],
-        ) -> tuple[bool, str | None]:
+        ) -> tuple[bool, str | None, str | None]:
             # item can be a string (url) or a (url, nice_name) tuple
             referer = None
             fallback_url = None
@@ -557,17 +665,39 @@ class BunkrClient:
                 fallback_url = item[3] if len(item) >= 4 else None
             else:
                 url, nice = item, None
-            async with semaphore:
-                result = await self.download_media(
-                    url,
-                    album_folder,
-                    suggested_name=nice,
-                    referer=referer,
-                    fallback_url=fallback_url,
-                )
+
+            last_err: str | None = None
+            for attempt in range(1, MAX_DOWNLOAD_ATTEMPTS + 1):
+                async with semaphore:
+                    try:
+                        result = await self.download_media(
+                            url,
+                            album_folder,
+                            suggested_name=nice,
+                            referer=referer,
+                            fallback_url=fallback_url,
+                        )
+                    except Exception as exc:
+                        last_err = f"Exception: {exc}"
+                        result = (False, last_err)
+
+                ok, err = result
+                if ok:
+                    async with pbar_lock:
+                        progress_bar.update(1)
+                    return True, None, nice
+                last_err = err
+                if attempt < MAX_DOWNLOAD_ATTEMPTS:
+                    wait = 2 ** min(attempt, 6) + random.uniform(0, 2)
+                    tqdm.write(
+                        f"[~] Retry {attempt}/{MAX_DOWNLOAD_ATTEMPTS - 1} for '{nice or url}'"
+                        f" ({err.strip() if err else 'unknown error'}) — waiting {wait:.1f}s"
+                    )
+                    await asyncio.sleep(wait)
+
             async with pbar_lock:
                 progress_bar.update(1)
-            return result
+            return False, last_err, nice
 
         tasks = [download_media_wrapper(item) for item in active_urls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -575,24 +705,37 @@ class BunkrClient:
         downloaded_files = []
         failed_files = []
         error_messages = []
+        # Entries: (url, name, reason) for items that exhausted all retries
+        permanently_failed: list[tuple[str, str, str]] = []
 
         for item, result in zip(active_urls, results):
             url = (
                 item[0] if isinstance(item, (list, tuple)) and len(item) >= 1 else item
             )
+            nice = (
+                item[1] if isinstance(item, (list, tuple)) and len(item) >= 2 else None
+            ) or ""
             if isinstance(result, Exception):
+                reason = str(result)
                 failed_files.append(url)
-                error_messages.append(f"\n[!] Error downloading '{url}': {result}")
+                error_messages.append(f"\n[!] Error downloading '{url}': {reason}")
+                permanently_failed.append((url, nice, reason))
                 continue
-            ok, err = result
+            ok, err, returned_name = result
             if ok:
                 downloaded_files.append(url)
             else:
+                reason = (err or "Unknown error").strip()
                 failed_files.append(url)
                 if err:
                     error_messages.append(err)
+                permanently_failed.append((url, returned_name or nice, reason))
 
         progress_bar.close()
+
+        # Write failed-links log if any download exhausted all retries
+        if permanently_failed:
+            _write_failed_links_log(album_folder, permanently_failed)
 
         return downloaded_files, failed_files, error_messages
 
